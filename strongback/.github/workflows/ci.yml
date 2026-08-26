@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: unittest on ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run the suite
+        run: python -m unittest discover -s tests -t . -v
+
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: python -m pip install --no-cache-dir "pytest==8.3.3"
+      - name: Run the suite under pytest
+        run: python -m pytest -q
+
+  reproducibility:
+    name: reproducibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: The same command twice under different hash seeds
+        run: |
+          set -eu
+          for command in \
+            "summary" \
+            "bill 3 --sheet" \
+            "retainage --movement" \
+            "waivers --paid PA-001" \
+            "payments --as-of 2025-01-15 --interest 12%" \
+            "wip" \
+            "closeout" \
+            "explain 3" \
+            "compare 4 aia_standard owner_favorable --attribute" \
+            "policy --profile public_works --changed"
+          do
+            PYTHONHASHSEED=0 python -m strongback $command > /tmp/first.txt || true
+            PYTHONHASHSEED=54321 python -m strongback $command > /tmp/second.txt || true
+            diff -u /tmp/first.txt /tmp/second.txt
+            echo "stable: strongback $command"
+          done
+      - name: A run survives an export and reload unchanged
+        run: |
+          set -eu
+          python -m strongback export run > /tmp/run.json
+          python -m strongback export run --file /tmp/run.json > /tmp/run-again.json
+          diff -u /tmp/run.json /tmp/run-again.json
+          python -m strongback bill 4 > /tmp/bill-sample.txt || true
+          python -m strongback bill 4 --file /tmp/run.json > /tmp/bill-loaded.txt || true
+          diff -u /tmp/bill-sample.txt /tmp/bill-loaded.txt
+      - name: The examples run
+        run: |
+          set -eu
+          for example in examples/*.py; do
+            python "$example" > /dev/null
+            echo "ran: $example"
+          done
+      - name: Every doctest in the package
+        run: python -m unittest tests.test_doctests -v

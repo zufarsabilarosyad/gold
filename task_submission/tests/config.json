@@ -1,0 +1,13 @@
+{
+ "base_commit": "a4f690a83411e7738df2615ab245ea8ebd9d0be9",
+ "f2p_node_ids": [],
+ "p2p_node_ids": [],
+ "grade": {
+  "format": "junit",
+  "tool_label": "pytest-junitxml",
+  "reports": [
+   "/logs/verifier/base.xml",
+   "/logs/verifier/new.xml"
+  ]
+ }
+}
