@@ -24,36 +24,25 @@ run_log() { echo "+ $*" >> "$RUN_LOG" 2>/dev/null; "$@" 2>&1 | tee -a "$RUN_LOG"
 git checkout -f 043beee3891e151b882db84156b6882b5e3d4588 -- /app/Cargo.toml 2>/dev/null || true
 rm -rf /app/build.rs /app/.cargo /app/Cargo.lock
 
-# 2. Create unprivileged 'tester' user and drop privileges for running candidate code
-if [ "$(id -u)" -eq 0 ]; then
-  id -u tester >/dev/null 2>&1 || useradd -m -s /bin/bash tester 2>/dev/null || true
+# 2. Setup build target and permissions
+chmod 1777 /tmp 2>/dev/null || true
+mkdir -p /tmp/target && chmod -R 777 /tmp/target 2>/dev/null || true
+chmod -R 777 /app 2>/dev/null || true
 
-  # Ensure cargo/rustup directories are accessible by tester
-  for dir in /root "$HOME" /home/* /usr/local; do
-    [ -d "$dir" ] && chmod 755 "$dir" 2>/dev/null || true
-  done
-  for cdir in "$HOME/.cargo" /root/.cargo /usr/local/cargo; do
-    [ -d "$cdir" ] && chmod -R a+rX "$cdir" 2>/dev/null || true
-  done
-  for rdir in "$HOME/.rustup" /root/.rustup /usr/local/rustup; do
-    [ -d "$rdir" ] && chmod -R a+rX "$rdir" 2>/dev/null || true
-  done
+# 3. Ensure toolchains are readable
+chmod 755 /root "$HOME" /usr/local /home/* 2>/dev/null || true
+for d in "$HOME/.cargo" /root/.cargo /usr/local/cargo "$HOME/.rustup" /root/.rustup /usr/local/rustup; do
+  [ -d "$d" ] && chmod -R a+rX "$d" 2>/dev/null || true
+done
 
-  # Grant tester ownership to app build target directory
-  chown -R tester:tester /app 2>/dev/null || true
-  chmod -R 755 /app 2>/dev/null || true
-  mkdir -p /app/target 2>/dev/null || true
-  chmod -R 777 /app/target 2>/dev/null || true
+# 4. Strictly isolate /tests, /app/tests, and /logs/verifier to root-only access
+chown -R root:root /tests /app/tests /app/Cargo.toml /logs/verifier 2>/dev/null || true
+chmod 700 /tests /logs/verifier 2>/dev/null || true
+chmod 400 /tests/config.json /tests/grader.py 2>/dev/null || true
+chmod 555 /app/tests /tests/test.sh 2>/dev/null || true
+chmod 444 /app/tests/*.rs /app/Cargo.toml 2>/dev/null || true
 
-  # Strictly isolate /tests, /app/tests, and /logs/verifier with root-only ownership
-  chown -R root:root /tests /app/tests /app/Cargo.toml /logs/verifier 2>/dev/null || true
-  chmod 700 /tests /logs/verifier 2>/dev/null || true
-  chmod 400 /tests/config.json /tests/grader.py 2>/dev/null || true
-  chmod 555 /app/tests /tests/test.sh 2>/dev/null || true
-  chmod 444 /app/tests/*.rs /app/Cargo.toml 2>/dev/null || true
-fi
-
-# Remove test.patch so candidate code running in tests cannot inspect hidden test contents
+# 5. Remove test.patch so candidate code cannot inspect hidden test contents
 rm -f /tests/test.patch 2>/dev/null || true
 
 for cargo_dir in "$HOME/.cargo/bin" /root/.cargo/bin /usr/local/cargo/bin /home/*/.cargo/bin; do
@@ -68,8 +57,11 @@ python3 - << 'PYEOF' 2>&1 | tee -a "$RUN_LOG"
 import os
 import json
 import subprocess
+import pwd
 import sys
 import xml.etree.ElementTree as ET
+
+nobody = pwd.getpwnam("nobody")
 
 with open("/tests/config.json") as f:
     cfg = json.load(f)
@@ -98,42 +90,29 @@ for cdir in ["/root/.cargo", f"{home}/.cargo", "/usr/local/cargo"]:
         env["CARGO_HOME"] = cdir
         break
 
+env["CARGO_TARGET_DIR"] = "/tmp/target"
+env["TMPDIR"] = "/tmp/target"
+
 def run_suite_authenticated(suites, xml_out):
     root = ET.Element("testsuites", name="cargo-test")
+    is_root = os.getuid() == 0
+
     for tname in suites:
         classname = f"bigu::{tname}"
         ts = ET.SubElement(root, "testsuite", name=classname)
         test_list = suite_tests.get(tname, [])
 
-        if os.getuid() == 0:
-            build_cmd = [
-                "runuser", "-u", "tester", "--",
-                "env",
-                f"PATH={env.get('PATH', '')}",
-                f"RUSTUP_HOME={env.get('RUSTUP_HOME', '')}",
-                f"CARGO_HOME={env.get('CARGO_HOME', '')}",
-                "cargo", "test", "--no-run", "--test", tname
-            ]
-        else:
-            build_cmd = ["cargo", "test", "--no-run", "--test", tname]
-
-        subprocess.run(build_cmd, cwd="/app", capture_output=True, text=True, env=env)
+        build_cmd = ["cargo", "test", "--no-run", "--test", tname]
+        kwargs = {"cwd": "/app", "capture_output": True, "text": True, "env": env}
+        if is_root:
+            kwargs["user"] = "nobody"
+            kwargs["group"] = nobody.pw_gid
+        subprocess.run(build_cmd, **kwargs)
 
         for t in test_list:
-            if os.getuid() == 0:
-                cmd = [
-                    "runuser", "-u", "tester", "--",
-                    "env",
-                    f"PATH={env.get('PATH', '')}",
-                    f"RUSTUP_HOME={env.get('RUSTUP_HOME', '')}",
-                    f"CARGO_HOME={env.get('CARGO_HOME', '')}",
-                    "cargo", "test", "--test", tname, "--", t, "--exact", "--nocapture"
-                ]
-            else:
-                cmd = ["cargo", "test", "--test", tname, "--", t, "--exact", "--nocapture"]
-
+            cmd = ["cargo", "test", "--test", tname, "--", t, "--exact", "--nocapture"]
             print(f"+ {' '.join(cmd)}", flush=True)
-            proc = subprocess.run(cmd, cwd="/app", capture_output=True, text=True, env=env)
+            proc = subprocess.run(cmd, **kwargs)
             out = proc.stdout + "\n" + proc.stderr
             print(out, flush=True)
 
@@ -154,7 +133,7 @@ run_suite_authenticated(["polynomial", "poly_roots"], "/logs/verifier/new.xml")
 PYEOF
 
 # Terminate any stray background processes spawned during test execution
-pkill -u tester -9 2>/dev/null || true
+pkill -u nobody -9 2>/dev/null || true
 
 # Restore permissions for root grading
 chmod 755 /tests /logs/verifier 2>/dev/null || true
