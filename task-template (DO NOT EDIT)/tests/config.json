@@ -1,0 +1,13 @@
+{
+ "base_commit": "043beee3891e151b882db84156b6882b5e3d4588",
+ "f2p_node_ids": [],
+ "p2p_node_ids": [],
+ "grade": {
+  "format": "junit",
+  "tool_label": "cargo-nextest",
+  "reports": [
+   "/logs/verifier/base.xml",
+   "/logs/verifier/new.xml"
+  ]
+ }
+}
