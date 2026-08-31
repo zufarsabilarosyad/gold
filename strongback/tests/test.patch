@@ -1,4 +1,0 @@
-<<EDIT-ME>> Replace this file's ENTIRE contents with a unified diff
-that ADDS the new tests at the base commit. It is applied only inside the
-verifier container — the solver never sees these tests. Test file paths must
-not overlap with files the solution touches.

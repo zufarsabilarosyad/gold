@@ -1,4 +1,0 @@
-<<EDIT-ME>> Replace this file's ENTIRE contents with the reference
-solution as a unified diff against the base commit (the output of
-"git diff <base>..<solution>" in your repository). The oracle run applies and
-commits it, and every listed fail-to-pass test must then pass.
