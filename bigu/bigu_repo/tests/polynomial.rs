@@ -91,22 +91,25 @@ fn polynomial_addition_and_subtraction_identities() {
     assert_eq!(neg_p1.coeffs(), &[bi(-1), bi(-2), bi(-3)]);
     assert_eq!(&p1 + &neg_p1, Poly::zero());
 
-    // By-value addition and subtraction
-    let p1_clone = p1.clone();
-    let p2_clone = p2.clone();
-    assert_eq!(p1_clone + p2_clone, sum);
+    // By-value addition, subtraction, and negation
+    assert_eq!(p1.clone() + p2.clone(), sum);
+    assert_eq!(p1.clone() - p2.clone(), diff);
+    assert_eq!(-p1.clone(), neg_p1);
 
     // BigQ arithmetic
     let q1 = Poly::new(vec![bq(1, 2), bq(2, 3), bq(-1, 5)]);
     let q2 = Poly::new(vec![bq(1, 4), bq(-1, 3), bq(3, 10), bq(7, 8)]);
     let q_sum = &q1 + &q2;
     assert_eq!(q_sum.coeffs(), &[bq(3, 4), bq(1, 3), bq(1, 10), bq(7, 8)]);
+    assert_eq!(q1.clone() + q2.clone(), q_sum);
 
     let q_diff = &q1 - &q2;
     assert_eq!(q_diff.coeffs(), &[bq(1, 4), bq(1, 1), bq(-1, 2), bq(-7, 8)]);
+    assert_eq!(q1.clone() - q2.clone(), q_diff);
 
     let q_neg = -&q1;
     assert_eq!(q_neg.coeffs(), &[bq(-1, 2), bq(-2, 3), bq(1, 5)]);
+    assert_eq!(-q1.clone(), q_neg);
 }
 
 #[test]
@@ -116,6 +119,9 @@ fn polynomial_multiplication_schoolbook_and_karatsuba() {
     let p2 = Poly::new(vec![bi(1), bi(-5), bi(4)]);
     let prod = &p1 * &p2;
     assert_eq!(prod.coeffs(), &[bi(3), bi(-13), bi(2), bi(8)]);
+
+    // By-value multiplication
+    assert_eq!(p1.clone() * p2.clone(), prod);
 
     // Multiplication commutativity: p1 * p2 == p2 * p1
     assert_eq!(&p1 * &p2, &p2 * &p1);
