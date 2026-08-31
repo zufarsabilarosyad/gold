@@ -72,6 +72,7 @@ mod fmt;
 pub mod intake;
 mod modring;
 mod mul;
+pub mod poly;
 mod prime;
 mod radix;
 mod ratio;
@@ -83,6 +84,7 @@ pub use crate::bigi::BigI;
 pub use crate::bigu::BigU;
 pub use crate::error::{Error, Result};
 pub use crate::modring::{CrtBasis, ModInt, ModRing, Reduction};
+pub use crate::poly::Poly;
 pub use crate::ratio::BigQ;
 pub use crate::prime::{DETERMINISTIC_PRIME_BOUND, MR_BASES, SMALL_PRIMES};
 

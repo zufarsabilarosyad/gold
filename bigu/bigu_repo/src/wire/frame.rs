@@ -45,6 +45,8 @@ pub enum Kind {
     Rational = 3,
     /// A varint count followed by that many unsigned frames.
     Residues = 4,
+    /// A varint count followed by that many signed coefficient frames.
+    Poly = 5,
 }
 
 impl Kind {
@@ -55,6 +57,7 @@ impl Kind {
             2 => Ok(Kind::Signed),
             3 => Ok(Kind::Rational),
             4 => Ok(Kind::Residues),
+            5 => Ok(Kind::Poly),
             _ => Err(Error::InvalidDigit { ch: byte as char, radix: 256 }),
         }
     }
@@ -237,6 +240,29 @@ pub fn decode_residues(enc: &Encoding, bytes: &[u8]) -> Result<Vec<BigU>> {
         at += head.total_len();
     }
     Ok(out)
+}
+
+/// Lays out a polynomial as a varint count followed by that many signed coefficient frames.
+pub fn encode_poly(enc: &Encoding, poly: &crate::poly::Poly<BigI>) -> Result<Vec<u8>> {
+    let coeffs = poly.coeffs();
+    let mut body = encode_varint(coeffs.len() as u64);
+    for coeff in coeffs {
+        body.extend_from_slice(&frame(Kind::Signed, &enc.encode_signed_field(coeff)?));
+    }
+    Ok(frame(Kind::Poly, &body))
+}
+
+/// Reads back a polynomial laid out by [`encode_poly`].
+pub fn decode_poly(enc: &Encoding, bytes: &[u8]) -> Result<crate::poly::Poly<BigI>> {
+    let (_, body) = expect(bytes, Kind::Poly)?;
+    let (count, mut at) = decode_varint(body, body.len() as u64)?;
+    let mut out = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let (head, payload) = expect(body.get(at..).ok_or(Error::EmptyString)?, Kind::Signed)?;
+        out.push(enc.decode_signed_field(payload)?);
+        at += head.total_len();
+    }
+    Ok(crate::poly::Poly::new(out))
 }
 
 #[cfg(test)]

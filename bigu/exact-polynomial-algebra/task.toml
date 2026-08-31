@@ -6,8 +6,8 @@ name = "afterquery/exact-polynomial-algebra"
 
 [metadata]
 task_id = "exact-polynomial-algebra"
-display_title = "<<EDIT-ME>> One-line title for this task"
-display_description = "<<EDIT-ME>> One or two sentences describing the change."
+display_title = "Exact univariate polynomial algebra with Sturm real root isolation and subresultant PRS GCD"
+display_description = "Implement univariate polynomial arithmetic over BigI and BigQ with Karatsuba multiplication, Yun square-free factorization, subresultant PRS fraction-free GCD, and Sturm real root isolation."
 category = "feature_request"
 language = "rust"
 repository_url = "platform://gold/repos/gLDG2b5EP375zqEfrcfE"

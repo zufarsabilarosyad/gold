@@ -1,21 +1,11 @@
-<<EDIT-ME>> Replace everything above the final IMPORTANT line with the task
-instruction, written the way you would brief a capable colleague who has
-never seen your change:
+Please implement univariate polynomial arithmetic in `bigu::poly` with `Poly<T>`.
 
-- Open with the problem or the need, then describe the finished behavior:
-  inputs, outputs, edge cases, error handling. The reader has the full
-  repository, so point at existing code where that helps.
-- Name the public surface your tests exercise (new commands, endpoints,
-  exported names, output shapes, exact strings your tests match) naturally
-  in prose. Every behavior your tests check must be stated here, and every
-  requirement you state should be something your tests check.
-- Leave internal decisions to the implementer. Do not dictate file layout,
-  helper or class names, private signatures, or exact wording of messages
-  your tests never assert on. If a sentence is only writable because you
-  have already seen the solution, cut it.
-- Write flowing developer prose in your own structure: no header template,
-  no numbered requirement ledger, no test references, no external links
-  (issues, pull requests, docs behind a login). Stop once the contract is
-  stated.
+Maintain canonical form where trailing zero coefficients are stripped; the zero polynomial has degree `None`, leading coefficient `None`, and empty coefficients. Provide constructors `Poly::new(Vec<T>)`, `Poly::from_coeffs(&[T])`, `Poly::from_monomial(usize, T)`, `Poly::zero()`, `Poly::one()`, and `Poly::x()`. Expose accessors `coeffs(&self) -> &[T]`, `into_coeffs(self) -> Vec<T>`, `degree(&self) -> Option<usize>`, `leading_coeff(&self) -> Option<&T>`, `coeff(&self, usize) -> Option<&T>`, and predicates `is_zero(&self) -> bool`, `is_one(&self) -> bool`, and `is_constant(&self) -> bool`. Implement operators `+`, `-`, unary `-`, and `*`.
+
+For `Poly<BigQ>`, implement `div_rem(&self, &Poly<BigQ>) -> Result<(Poly<BigQ>, Poly<BigQ>)>` (yielding `Err(Error::DivByZero)` when divisor is zero), `to_monic(&self) -> Poly<BigQ>`, monic `gcd(&self, &Poly<BigQ>) -> Poly<BigQ>`, Horner `eval(&self, &BigQ) -> BigQ`, `compose(&self, &Poly<BigQ>) -> Poly<BigQ>`, `derivative(&self) -> Poly<BigQ>`, `integral(&self) -> Poly<BigQ>`, and Yun square-free decomposition `square_free_factorization(&self) -> Vec<(Poly<BigQ>, usize)>`. Provide Sturm sequences `sturm_sequence(&self) -> Vec<Poly<BigQ>>`, sign variation counting `count_sign_variations(seq: &[Poly<BigQ>], at: &BigQ) -> usize`, root counting `count_real_roots_between(&self, a: &BigQ, b: &BigQ) -> usize` on `(a, b]`, Cauchy root bound `cauchy_root_bound(&self) -> BigQ`, and bisection root isolation `isolate_real_roots(&self, eps: &BigQ) -> Vec<(BigQ, BigQ)>` returning sorted disjoint intervals of width at most `eps` (or empty if `eps <= 0`).
+
+For `Poly<BigI>`, implement `content(&self) -> BigI`, primitive reduction `primitive_part(&self) -> Poly<BigI>`, pseudo-division `pseudo_div_rem(&self, &Poly<BigI>) -> Result<(Poly<BigI>, Poly<BigI>, BigI, usize)>` returning `(q, r, multiplier, delta)` with multiplier = $d^{\delta}$, and `subresultant_gcd(&self, &Poly<BigI>) -> Poly<BigI>` returning the primitive greatest common divisor with positive leading coefficient.
+
+Implement `Display` (descending terms e.g. `"3x^3 - 2x^2 + 5"`, `"0"`, `"x"`, `"-x"`) and `FromStr` parsing spaced, compact, and rational forms (e.g. `"1/2x^2 - 3/4x + 7"`, `"x^4-x^3+x-5"`). In `bigu::wire`, implement `encode_poly` and `decode_poly` with `Kind::Poly = 5` framing a varint coefficient count followed by ascending signed coefficient frames. In `bigu::audit::invariant`, implement `check_poly`.
 
 IMPORTANT: Please work on this in a new branch from main and commit everything when you are done.

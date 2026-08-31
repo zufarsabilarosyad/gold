@@ -75,7 +75,7 @@ pub mod width;
 
 pub use self::codec::{decode, encode, Encoding};
 pub use self::envelope::Envelope;
-pub use self::frame::{FrameHeader, Kind};
+pub use self::frame::{decode_poly, encode_poly, FrameHeader, Kind};
 pub use self::order::Endian;
 pub use self::stream::{frames, read_framed, write_framed, Frames};
 pub use self::varint::{decode_varint, encode_varint};

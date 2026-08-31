@@ -19,25 +19,108 @@ export RUN_LOG=/logs/verifier/run.log
 run_log() { echo "+ $*" >> "$RUN_LOG" 2>/dev/null; "$@" 2>&1 | tee -a "$RUN_LOG"; return "${PIPESTATUS[0]}"; }
 
 # >>> RUN TESTS (task-specific) <<<
-# <<EDIT-ME>> Replace this block with your real test invocations, then
-# delete this marker line. Run TWO selections — the existing suite (backs the
-# pass-to-pass ids) and your new tests (the fail-to-pass ids) — and write one
-# machine-readable report per selection at exactly the paths listed under
-# "grade".reports in tests/config.json. A test missing from every report
-# grades as failed, so never let a command abort the block early.
-#
-# cargo-nextest emits JUnit XML (grade format "junit") via a profile with
-# junit output enabled; copy each run's report to its config.json path:
-#
-#   set +e
-#   run_log cargo nextest run --profile ci -E 'test(existing_area)'
-#   cp target/nextest/ci/junit.xml /logs/verifier/base.xml
-#   run_log cargo nextest run --profile ci -E 'test(new_behavior)'
-#   cp target/nextest/ci/junit.xml /logs/verifier/new.xml
-#   set -e
-#
-# Plain cargo test has no per-test report format — use nextest (or a CTRF
-# converter and switch grade.format to "ctrf").
+# Anti-cheating & integrity:
+# 1. Reset Cargo.toml to base version so custom [[test]] targets or harness=false cannot be injected
+git checkout -f 043beee3891e151b882db84156b6882b5e3d4588 -- /app/Cargo.toml 2>/dev/null || true
+rm -rf /app/build.rs /app/.cargo /app/Cargo.lock
+
+# 2. Make Cargo.toml, tests, and verifier files read-only
+cp /tests/config.json /tmp/.config_backup.json 2>/dev/null || true
+chmod 555 /tests /tests/test.sh /tests/grader.py /app/tests 2>/dev/null || true
+chmod 444 /tests/config.json /tests/test.patch /app/tests/*.rs /app/Cargo.toml 2>/dev/null || true
+
+for cargo_dir in "$HOME/.cargo/bin" /root/.cargo/bin /usr/local/cargo/bin /home/*/.cargo/bin; do
+  if [ -f "$cargo_dir/cargo" ]; then
+    export PATH="$cargo_dir:$PATH"
+    break
+  fi
+done
+
+set +e
+python3 - << 'PYEOF' 2>&1 | tee -a "$RUN_LOG"
+import os
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+
+def run_suite(tests, xml_out):
+    root = ET.Element("testsuites", name="cargo-test")
+    env = dict(os.environ)
+    home = os.path.expanduser("~")
+    for cdir in ["/root/.cargo/bin", f"{home}/.cargo/bin", "/usr/local/cargo/bin"]:
+        if os.path.exists(f"{cdir}/cargo"):
+            env["PATH"] = f"{cdir}:{env.get('PATH', '')}"
+            break
+
+    for tname in tests:
+        classname = f"bigu::{tname}"
+        ts = ET.SubElement(root, "testsuite", name=classname)
+        cmd = ["cargo", "test", "--test", tname, "--", "--nocapture"]
+        print(f"+ {' '.join(cmd)}", flush=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        out = proc.stdout + "\n" + proc.stderr
+        print(out, flush=True)
+
+        if proc.returncode != 0 or "test result: ok." not in proc.stdout:
+            tc = ET.SubElement(ts, "testcase", classname=classname, name="compilation_or_execution")
+            fail = ET.SubElement(tc, "failure", message=f"{tname} failed with return code {proc.returncode}")
+            fail.text = out
+            continue
+
+        m_start = re.search(r"^running (\d+) tests?", proc.stdout, re.M)
+        m_end = re.search(r"^test result: ok\. (\d+) passed;", proc.stdout, re.M)
+        if not m_start or not m_end or int(m_start.group(1)) != int(m_end.group(1)):
+            tc = ET.SubElement(ts, "testcase", classname=classname, name="libtest_authentication_failure")
+            fail = ET.SubElement(tc, "failure", message=f"{tname} failed libtest count verification")
+            fail.text = out
+            continue
+
+        in_libtest_block = False
+        parsed_any = False
+        for line in proc.stdout.splitlines():
+            line_str = line.strip()
+            if line_str.startswith("running ") and " tests" in line_str:
+                in_libtest_block = True
+                continue
+            if line_str.startswith("test result:"):
+                in_libtest_block = False
+                continue
+            if in_libtest_block and line_str.startswith("test ") and line_str.endswith(" ... ok"):
+                parts = line_str.split()
+                if len(parts) >= 4 and parts[0] == "test" and parts[-2] == "...":
+                    name = parts[1]
+                    parsed_any = True
+                    ET.SubElement(ts, "testcase", classname=classname, name=name)
+            elif in_libtest_block and line_str.startswith("test ") and line_str.endswith(" ... ignored"):
+                parts = line_str.split()
+                if len(parts) >= 4 and parts[0] == "test" and parts[-2] == "...":
+                    name = parts[1]
+                    parsed_any = True
+                    tc = ET.SubElement(ts, "testcase", classname=classname, name=name)
+                    ET.SubElement(tc, "skipped")
+
+        if not parsed_any:
+            tc = ET.SubElement(ts, "testcase", classname=classname, name="no_tests_executed")
+            fail = ET.SubElement(tc, "failure", message=f"{tname} produced no valid libtest results")
+            fail.text = out
+
+    os.makedirs(os.path.dirname(xml_out), exist_ok=True)
+    tree = ET.ElementTree(root)
+    ET.indent(tree, space="  ")
+    tree.write(xml_out, encoding="utf-8", xml_declaration=True)
+
+run_suite(["arithmetic", "formatting", "modular", "primality", "rational"], "/logs/verifier/base.xml")
+run_suite(["polynomial", "poly_roots"], "/logs/verifier/new.xml")
+PYEOF
+
+# Ensure pristine config is restored if tampered with
+if [ -f /tmp/.config_backup.json ]; then
+  chmod 644 /tests/config.json 2>/dev/null || true
+  cp -f /tmp/.config_backup.json /tests/config.json 2>/dev/null || true
+  chmod 444 /tests/config.json 2>/dev/null || true
+fi
+set -e
 # >>> END RUN TESTS <<<
 
 # Surface raw suite output into stdout (the harness captures it) so failures
