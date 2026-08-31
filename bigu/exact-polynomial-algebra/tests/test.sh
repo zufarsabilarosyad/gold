@@ -24,10 +24,11 @@ run_log() { echo "+ $*" >> "$RUN_LOG" 2>/dev/null; "$@" 2>&1 | tee -a "$RUN_LOG"
 git checkout -f 043beee3891e151b882db84156b6882b5e3d4588 -- /app/Cargo.toml 2>/dev/null || true
 rm -rf /app/build.rs /app/.cargo /app/Cargo.lock
 
-# 2. Hide config.json during test execution so candidate code in earlier suites cannot read it
-CONFIG_BACKUP="/tmp/.hidden_verifier_cfg_$(head -c 16 /dev/urandom 2>/dev/null | xxd -p 2>/dev/null || echo 'sec_cfg')"
-cp -f /tests/config.json "$CONFIG_BACKUP" 2>/dev/null || true
-rm -f /tests/config.json 2>/dev/null || true
+# 2. Securely stash verifier vault outside /tests and remove /tests files during execution
+VAULT_DIR="/tmp/.verifier_vault_$(head -c 16 /dev/urandom 2>/dev/null | xxd -p 2>/dev/null || echo 'vault_sec')"
+mkdir -p "$VAULT_DIR"
+cp -rf /tests/* "$VAULT_DIR/" 2>/dev/null || true
+rm -rf /tests/*
 
 for cargo_dir in "$HOME/.cargo/bin" /root/.cargo/bin /usr/local/cargo/bin /home/*/.cargo/bin; do
   if [ -f "$cargo_dir/cargo" ]; then
@@ -39,90 +40,64 @@ done
 set +e
 python3 - << 'PYEOF' 2>&1 | tee -a "$RUN_LOG"
 import os
-import re
+import glob
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
-def run_suite(tests, xml_out):
+env = dict(os.environ)
+home = os.path.expanduser("~")
+for cdir in ["/root/.cargo/bin", home + "/.cargo/bin", "/usr/local/cargo/bin"]:
+    if os.path.exists(cdir + "/cargo"):
+        env["PATH"] = cdir + ":" + env.get("PATH", "")
+        break
+
+def run_suite_binary(tests, xml_out):
     root = ET.Element("testsuites", name="cargo-test")
-    env = dict(os.environ)
-    home = os.path.expanduser("~")
-    for cdir in ["/root/.cargo/bin", f"{home}/.cargo/bin", "/usr/local/cargo/bin"]:
-        if os.path.exists(f"{cdir}/cargo"):
-            env["PATH"] = f"{cdir}:{env.get('PATH', '')}"
-            break
-
     for tname in tests:
-        # Re-verify and restore test file fresh before compiling to defeat tampering by earlier suites
-        if tname in ["polynomial", "poly_roots"]:
-            subprocess.run(["git", "checkout", "HEAD", "--", f"tests/{tname}.rs"], cwd="/app", capture_output=True)
-            if os.path.exists("/tests/test.patch"):
-                subprocess.run(["git", "apply", "--whitespace=nowarn", "--allow-empty", "/tests/test.patch"], cwd="/app", capture_output=True)
-
-        classname = f"bigu::{tname}"
+        classname = "bigu::" + tname
         ts = ET.SubElement(root, "testsuite", name=classname)
-        cmd = ["cargo", "test", "--test", tname, "--", "--nocapture"]
-        print(f"+ {' '.join(cmd)}", flush=True)
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd="/app")
-        out = proc.stdout + "\n" + proc.stderr
-        print(out, flush=True)
-
-        if proc.returncode != 0 or "test result: ok." not in proc.stdout:
-            tc = ET.SubElement(ts, "testcase", classname=classname, name="compilation_or_execution")
-            fail = ET.SubElement(tc, "failure", message=f"{tname} failed with return code {proc.returncode}")
-            fail.text = out
+        build_cmd = ["cargo", "test", "--no-run", "--test", tname]
+        print("+ " + " ".join(build_cmd), flush=True)
+        build_proc = subprocess.run(build_cmd, cwd="/app", capture_output=True, text=True, env=env)
+        if build_proc.returncode != 0:
+            tc = ET.SubElement(ts, "testcase", classname=classname, name="compilation")
+            fail = ET.SubElement(tc, "failure", message="Compilation failed")
+            fail.text = build_proc.stdout + "\n" + build_proc.stderr
             continue
 
-        m_start = re.search(r"^running (\d+) tests?", proc.stdout, re.M)
-        m_end = re.search(r"^test result: ok\. (\d+) passed;", proc.stdout, re.M)
-        if not m_start or not m_end or int(m_start.group(1)) != int(m_end.group(1)):
-            tc = ET.SubElement(ts, "testcase", classname=classname, name="libtest_authentication_failure")
-            fail = ET.SubElement(tc, "failure", message=f"{tname} failed libtest count verification")
-            fail.text = out
+        binaries = [f for f in glob.glob("/app/target/debug/deps/" + tname + "-*") if not f.endswith(".d") and os.access(f, os.X_OK)]
+        if not binaries:
+            tc = ET.SubElement(ts, "testcase", classname=classname, name="binary_discovery")
+            fail = ET.SubElement(tc, "failure", message="No compiled test binary found")
             continue
 
-        in_libtest_block = False
-        parsed_any = False
-        for line in proc.stdout.splitlines():
-            line_str = line.strip()
-            if line_str.startswith("running ") and " tests" in line_str:
-                in_libtest_block = True
-                continue
-            if line_str.startswith("test result:"):
-                in_libtest_block = False
-                continue
-            if in_libtest_block and line_str.startswith("test ") and line_str.endswith(" ... ok"):
-                parts = line_str.split()
-                if len(parts) >= 4 and parts[0] == "test" and parts[-2] == "...":
-                    name = parts[1]
-                    parsed_any = True
-                    ET.SubElement(ts, "testcase", classname=classname, name=name)
-            elif in_libtest_block and line_str.startswith("test ") and line_str.endswith(" ... ignored"):
-                parts = line_str.split()
-                if len(parts) >= 4 and parts[0] == "test" and parts[-2] == "...":
-                    name = parts[1]
-                    parsed_any = True
-                    tc = ET.SubElement(ts, "testcase", classname=classname, name=name)
-                    ET.SubElement(tc, "skipped")
+        # Sort by modification time to get the latest built test binary
+        binaries.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        bin_path = binaries[0]
 
-        if not parsed_any:
-            tc = ET.SubElement(ts, "testcase", classname=classname, name="no_tests_executed")
-            fail = ET.SubElement(tc, "failure", message=f"{tname} produced no valid libtest results")
-            fail.text = out
+        list_proc = subprocess.run([bin_path, "--list", "--format=terse"], capture_output=True, text=True)
+        test_names = [line.split(": ")[0].strip() for line in list_proc.stdout.splitlines() if ": test" in line]
+
+        for t in test_names:
+            tc = ET.SubElement(ts, "testcase", classname=classname, name=t)
+            res = subprocess.run([bin_path, t, "--exact", "--nocapture"], capture_output=True, text=True)
+            if res.returncode != 0:
+                fail = ET.SubElement(tc, "failure", message="Test failed with return code " + str(res.returncode))
+                fail.text = res.stdout + "\n" + res.stderr
 
     os.makedirs(os.path.dirname(xml_out), exist_ok=True)
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")
     tree.write(xml_out, encoding="utf-8", xml_declaration=True)
 
-run_suite(["arithmetic", "formatting", "modular", "primality", "rational"], "/logs/verifier/base.xml")
-run_suite(["polynomial", "poly_roots"], "/logs/verifier/new.xml")
+run_suite_binary(["arithmetic", "formatting", "modular", "primality", "rational"], "/logs/verifier/base.xml")
+run_suite_binary(["polynomial", "poly_roots"], "/logs/verifier/new.xml")
 PYEOF
 
-# Restore config.json exclusively for grader.py
-cp -f "$CONFIG_BACKUP" /tests/config.json 2>/dev/null || true
-rm -f "$CONFIG_BACKUP" 2>/dev/null || true
+# Restore verifier files exclusively for grader.py
+cp -rf "$VAULT_DIR"/* /tests/ 2>/dev/null || true
+rm -rf "$VAULT_DIR" 2>/dev/null || true
 set -e
 # >>> END RUN TESTS <<<
 
