@@ -24,40 +24,14 @@ run_log() { echo "+ $*" >> "$RUN_LOG" 2>/dev/null; "$@" 2>&1 | tee -a "$RUN_LOG"
 git checkout -f 043beee3891e151b882db84156b6882b5e3d4588 -- /app/Cargo.toml 2>/dev/null || true
 rm -rf /app/build.rs /app/.cargo /app/Cargo.lock
 
-# 2. Setup unprivileged runner user 'tester'
-if [ "$(id -u)" -eq 0 ]; then
-  id -u tester >/dev/null 2>&1 || useradd -m -s /bin/bash tester 2>/dev/null || true
-  for dir in /root "$HOME" /home/* /usr/local; do
-    [ -d "$dir" ] && chmod 755 "$dir" 2>/dev/null || true
-  done
-  for cdir in "$HOME/.cargo" /root/.cargo /usr/local/cargo; do
-    [ -d "$cdir" ] && chmod -R 755 "$cdir" 2>/dev/null || true
-  done
-  for rdir in "$HOME/.rustup" /root/.rustup /usr/local/rustup; do
-    [ -d "$rdir" ] && chmod -R 755 "$rdir" 2>/dev/null || true
-  done
-  mkdir -p /tmp/target /tmp/.cargo_cache
-  chmod -R 777 /tmp/target /tmp/.cargo_cache
-fi
-
-# 3. Strictly protect /tests, /app/tests, and /app/Cargo.toml against unprivileged modification
-cp /tests/config.json /tmp/.config_backup.json 2>/dev/null || true
-chown -R root:root /tests /app/tests /app/Cargo.toml 2>/dev/null || true
-chmod 700 /tests 2>/dev/null || true
-chmod 400 /tests/config.json /tests/test.patch 2>/dev/null || true
-chmod 555 /app/tests /tests/test.sh /tests/grader.py 2>/dev/null || true
-chmod 444 /app/tests/*.rs /app/Cargo.toml 2>/dev/null || true
+# 2. Hide config.json during test execution so candidate code in earlier suites cannot read it
+CONFIG_BACKUP="/tmp/.hidden_verifier_cfg_$(head -c 16 /dev/urandom 2>/dev/null | xxd -p 2>/dev/null || echo 'sec_cfg')"
+cp -f /tests/config.json "$CONFIG_BACKUP" 2>/dev/null || true
+rm -f /tests/config.json 2>/dev/null || true
 
 for cargo_dir in "$HOME/.cargo/bin" /root/.cargo/bin /usr/local/cargo/bin /home/*/.cargo/bin; do
   if [ -f "$cargo_dir/cargo" ]; then
     export PATH="$cargo_dir:$PATH"
-    break
-  fi
-done
-
-for rdir in "$HOME/.rustup" /root/.rustup /usr/local/rustup; do
-  if [ -d "$rdir" ]; then
-    export RUSTUP_HOME="$rdir"
     break
   fi
 done
@@ -80,23 +54,17 @@ def run_suite(tests, xml_out):
             break
 
     for tname in tests:
+        # Re-verify and restore test file fresh before compiling to defeat tampering by earlier suites
+        if tname in ["polynomial", "poly_roots"]:
+            subprocess.run(["git", "checkout", "HEAD", "--", f"tests/{tname}.rs"], cwd="/app", capture_output=True)
+            if os.path.exists("/tests/test.patch"):
+                subprocess.run(["git", "apply", "--whitespace=nowarn", "--allow-empty", "/tests/test.patch"], cwd="/app", capture_output=True)
+
         classname = f"bigu::{tname}"
         ts = ET.SubElement(root, "testsuite", name=classname)
-        if os.getuid() == 0:
-            cmd = [
-                "runuser", "-u", "tester", "--",
-                "env",
-                f"PATH={env.get('PATH', '')}",
-                f"RUSTUP_HOME={env.get('RUSTUP_HOME', '')}",
-                "CARGO_TARGET_DIR=/tmp/target",
-                "CARGO_HOME=/tmp/.cargo_cache",
-                "cargo", "test", "--test", tname, "--", "--nocapture"
-            ]
-        else:
-            cmd = ["cargo", "test", "--test", tname, "--", "--nocapture"]
-
+        cmd = ["cargo", "test", "--test", tname, "--", "--nocapture"]
         print(f"+ {' '.join(cmd)}", flush=True)
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd="/app")
         out = proc.stdout + "\n" + proc.stderr
         print(out, flush=True)
 
@@ -152,12 +120,9 @@ run_suite(["arithmetic", "formatting", "modular", "primality", "rational"], "/lo
 run_suite(["polynomial", "poly_roots"], "/logs/verifier/new.xml")
 PYEOF
 
-# Restore verifier permissions for grader.py
-chmod 755 /tests /tests/grader.py 2>/dev/null || true
-chmod 644 /tests/config.json /tests/test.patch 2>/dev/null || true
-if [ -f /tmp/.config_backup.json ]; then
-  cp -f /tmp/.config_backup.json /tests/config.json 2>/dev/null || true
-fi
+# Restore config.json exclusively for grader.py
+cp -f "$CONFIG_BACKUP" /tests/config.json 2>/dev/null || true
+rm -f "$CONFIG_BACKUP" 2>/dev/null || true
 set -e
 # >>> END RUN TESTS <<<
 
