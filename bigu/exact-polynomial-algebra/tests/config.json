@@ -14,7 +14,6 @@
     "bigu::poly_roots.sturm_sequence_quadratic_and_cubic",
     "bigu::poly_roots.sturm_sign_variations_and_root_counting",
     "bigu::polynomial.polynomial_addition_and_subtraction_identities",
-    "bigu::polynomial.polynomial_audit_invariant_check",
     "bigu::polynomial.polynomial_canonical_form_and_constructors",
     "bigu::polynomial.polynomial_composition_properties",
     "bigu::polynomial.polynomial_derivative_and_integral",

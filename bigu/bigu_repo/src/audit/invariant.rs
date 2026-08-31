@@ -110,21 +110,6 @@ pub fn check_bigq(v: &BigQ) -> Vec<Violation> {
     found
 }
 
-/// Checks a [`crate::Poly`]: no trailing zero coefficients and each coefficient is canonical.
-pub fn check_poly(p: &crate::poly::Poly<BigI>) -> Vec<Violation> {
-    let mut found = Vec::new();
-    let coeffs = p.coeffs();
-    if let Some(last) = coeffs.last() {
-        if last.is_zero() {
-            found.push(Violation::TrailingZeroLimb(coeffs.len() - 1));
-        }
-    }
-    for c in coeffs {
-        found.extend(check_bigi(c));
-    }
-    found
-}
-
 /// Checks that a [`ModInt`] holds a residue strictly below its ring's modulus.
 ///
 /// ```

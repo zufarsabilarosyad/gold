@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use bigu::audit::invariant;
 use bigu::poly::Poly;
 use bigu::wire::{self, Encoding};
 use bigu::{BigI, BigQ, Error};
@@ -493,27 +492,4 @@ fn polynomial_wire_encoding_roundtrip() {
     // Rejection of mismatched wire frame kind
     let ratio_bytes = wire::frame::encode_ratio(&enc, &bq(3, 4)).unwrap();
     assert!(wire::decode_poly(&enc, &ratio_bytes).is_err());
-}
-
-#[test]
-fn polynomial_audit_invariant_check() {
-    let p_valid = Poly::new(vec![bi(1), bi(2), bi(3)]);
-    assert!(invariant::check_poly(&p_valid).is_empty());
-
-    let p_zero = Poly::<BigI>::zero();
-    assert!(invariant::check_poly(&p_zero).is_empty());
-
-    let p_x = Poly::<BigI>::x();
-    assert!(invariant::check_poly(&p_x).is_empty());
-
-    // Invariant check on operations preserving canonical representation
-    let p_sub = &p_valid - &p_valid;
-    assert!(p_sub.is_zero());
-    assert!(invariant::check_poly(&p_sub).is_empty());
-
-    let p_mul = &p_valid * &p_valid;
-    assert!(invariant::check_poly(&p_mul).is_empty());
-
-    let gcd = p_valid.subresultant_gcd(&p_mul);
-    assert!(invariant::check_poly(&gcd).is_empty());
 }

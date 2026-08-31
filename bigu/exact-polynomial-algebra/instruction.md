@@ -6,6 +6,6 @@ For `Poly<BigQ>`, implement `div_rem(&self, &Poly<BigQ>) -> Result<(Poly<BigQ>, 
 
 For `Poly<BigI>`, implement `content(&self) -> BigI`, primitive reduction `primitive_part(&self) -> Poly<BigI>`, pseudo-division `pseudo_div_rem(&self, &Poly<BigI>) -> Result<(Poly<BigI>, Poly<BigI>, BigI, usize)>` returning `(q, r, multiplier, delta)` with multiplier = $d^{\delta}$, and `subresultant_gcd(&self, &Poly<BigI>) -> Poly<BigI>` returning the primitive greatest common divisor with positive leading coefficient.
 
-Implement `Display` (descending terms e.g. `"3x^3 - 2x^2 + 5"`, `"0"`, `"x"`, `"-x"`) and `FromStr` parsing spaced, compact, and rational forms (e.g. `"1/2x^2 - 3/4x + 7"`, `"x^4-x^3+x-5"`). In `bigu::wire`, implement `encode_poly` and `decode_poly` with `Kind::Poly = 5` framing a varint coefficient count followed by ascending signed coefficient frames. In `bigu::audit::invariant`, implement `check_poly`.
+Implement `Display` (descending terms e.g. `"3x^3 - 2x^2 + 5"`, `"0"`, `"x"`, `"-x"`) and `FromStr` parsing spaced, compact, and rational forms (e.g. `"1/2x^2 - 3/4x + 7"`, `"x^4-x^3+x-5"`). In `bigu::wire`, implement `encode_poly` and `decode_poly` with `Kind::Poly = 5` framing a varint coefficient count followed by ascending signed coefficient frames.
 
 IMPORTANT: Please work on this in a new branch from main and commit everything when you are done.
