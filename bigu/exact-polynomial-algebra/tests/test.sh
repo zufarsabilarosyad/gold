@@ -66,17 +66,20 @@ def run_suite_authenticated(suites, xml_out):
         classname = "bigu::" + tname
         ts = ET.SubElement(root, "testsuite", name=classname)
         test_list = suite_tests.get(tname, [])
-        cmd = ["cargo", "test", "--test", tname, "--", "--nocapture"]
-        print("+ " + " ".join(cmd), flush=True)
-        proc = subprocess.run(cmd, cwd="/app", capture_output=True, text=True, env=env)
-        out = proc.stdout + "\n" + proc.stderr
-        print(out, flush=True)
 
-        if proc.returncode == 0:
-            for t in test_list:
+        # Pre-build test suite once so each individual test run is instant
+        subprocess.run(["cargo", "test", "--no-run", "--test", tname], cwd="/app", capture_output=True, text=True, env=env)
+
+        for t in test_list:
+            cmd = ["cargo", "test", "--test", tname, "--", t, "--exact", "--nocapture"]
+            print("+ " + " ".join(cmd), flush=True)
+            proc = subprocess.run(cmd, cwd="/app", capture_output=True, text=True, env=env)
+            out = proc.stdout + "\n" + proc.stderr
+            print(out, flush=True)
+
+            if proc.returncode == 0 and "test result: ok. 1 passed" in proc.stdout:
                 ET.SubElement(ts, "testcase", classname=classname, name=t)
-        else:
-            for t in test_list:
+            else:
                 tc = ET.SubElement(ts, "testcase", classname=classname, name=t)
                 fail = ET.SubElement(tc, "failure", message="Test failed with returncode " + str(proc.returncode))
                 fail.text = out
