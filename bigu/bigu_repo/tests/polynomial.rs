@@ -499,3 +499,49 @@ fn polynomial_wire_encoding_roundtrip() {
     let ratio_bytes = wire::frame::encode_ratio(&enc, &bq(3, 4)).unwrap();
     assert!(wire::decode_poly(&enc, &ratio_bytes).is_err());
 }
+
+#[test]
+fn polynomial_resultant_and_discriminant_identities() {
+    // Sylvester matrix resultant: res(x^2 - 2, x^2 - 3) = (2 - 3)^2 = 1
+    let p_sqrt2 = Poly::new(vec![bi(-2), bi(0), bi(1)]);
+    let p_sqrt3 = Poly::new(vec![bi(-3), bi(0), bi(1)]);
+    assert_eq!(p_sqrt2.resultant(&p_sqrt3), bi(1));
+
+    // res(x^2 + 1, x^2 - 1) = (1 - (-1))^2 = 4
+    let p_plus1 = Poly::new(vec![bi(1), bi(0), bi(1)]);
+    let p_minus1 = Poly::new(vec![bi(-1), bi(0), bi(1)]);
+    assert_eq!(p_plus1.resultant(&p_minus1), bi(4));
+
+    // Linear polynomials: res(2x + 3, 4x - 5) = 2*(-5) - 3*4 = -22
+    let l1 = Poly::new(vec![bi(3), bi(2)]);
+    let l2 = Poly::new(vec![bi(-5), bi(4)]);
+    assert_eq!(l1.resultant(&l2), bi(-22));
+
+    // Common factor implies zero resultant: (x - 2)(x + 3) and (x - 2)(x - 5)
+    let p_com1 = Poly::new(vec![bi(-6), bi(1), bi(1)]); // x^2 + x - 6
+    let p_com2 = Poly::new(vec![bi(10), bi(-7), bi(1)]); // x^2 - 7x + 10
+    assert_eq!(p_com1.resultant(&p_com2), bi(0));
+
+    // Zero polynomial resultant is zero
+    assert_eq!(p_sqrt2.resultant(&Poly::zero()), bi(0));
+    assert_eq!(Poly::zero().resultant(&p_sqrt2), bi(0));
+
+    // Discriminant of quadratic ax^2 + bx + c: b^2 - 4ac
+    // 2x^2 + 5x + 3 -> 25 - 24 = 1
+    let quad = Poly::new(vec![bi(3), bi(5), bi(2)]);
+    assert_eq!(quad.discriminant(), Some(bi(1)));
+
+    // Discriminant of monic cubic x^3 - 7x + 6 (roots 1, 2, -3):
+    // (1-2)^2 * (1-(-3))^2 * (2-(-3))^2 = 1 * 16 * 25 = 400
+    let cubic = Poly::new(vec![bi(6), bi(-7), bi(0), bi(1)]);
+    assert_eq!(cubic.discriminant(), Some(bi(400)));
+
+    // Discriminant of linear polynomial is 1
+    let linear = Poly::new(vec![bi(7), bi(3)]);
+    assert_eq!(linear.discriminant(), Some(bi(1)));
+
+    // Discriminant of constant or zero polynomial is None
+    let constant = Poly::new(vec![bi(42)]);
+    assert_eq!(constant.discriminant(), None);
+    assert_eq!(Poly::<BigI>::zero().discriminant(), None);
+}

@@ -866,6 +866,111 @@ impl Poly<BigI> {
             p2 = p3;
         }
     }
+
+    /// Computes the resultant of two integer polynomials via the Sylvester matrix determinant.
+    pub fn resultant(&self, other: &Self) -> BigI {
+        if self.is_zero() || other.is_zero() {
+            return BigI::zero();
+        }
+        let m = self.degree().unwrap();
+        let n = other.degree().unwrap();
+        if m == 0 && n == 0 {
+            return BigI::one();
+        }
+        if m == 0 {
+            return self.coeffs[0].pow(n as u32);
+        }
+        if n == 0 {
+            return other.coeffs[0].pow(m as u32);
+        }
+        let dim = m + n;
+        let mut mat = vec![vec![BigI::zero(); dim]; dim];
+        for i in 0..n {
+            for j in 0..=m {
+                mat[i][i + j] = self.coeffs[m - j].clone();
+            }
+        }
+        for i in 0..m {
+            for j in 0..=n {
+                mat[n + i][i + j] = other.coeffs[n - j].clone();
+            }
+        }
+        bareiss_determinant(&mut mat)
+    }
+
+    /// Computes the discriminant of the polynomial:
+    /// $\text{disc}(P) = (-1)^{n(n-1)/2} \frac{\text{res}(P, P')}{a_n}$.
+    pub fn discriminant(&self) -> Option<BigI> {
+        let n = self.degree()?;
+        if n == 0 {
+            return None;
+        }
+        if n == 1 {
+            return Some(BigI::one());
+        }
+        let an = self.leading_coeff().unwrap();
+        let mut d_coeffs = Vec::with_capacity(self.coeffs.len() - 1);
+        for (i, coeff) in self.coeffs.iter().enumerate().skip(1) {
+            d_coeffs.push(coeff * &BigI::from(i as i64));
+        }
+        let p_prime = Poly::new(d_coeffs);
+        let res = self.resultant(&p_prime);
+        let div = &res / an;
+        let sign_exp = (n * (n - 1) / 2) % 2;
+        if sign_exp == 1 {
+            Some(-div)
+        } else {
+            Some(div)
+        }
+    }
+}
+
+fn bareiss_determinant(mat: &mut [Vec<BigI>]) -> BigI {
+    let n = mat.len();
+    if n == 0 {
+        return BigI::one();
+    }
+    if n == 1 {
+        return mat[0][0].clone();
+    }
+    let mut sign = 1i64;
+    for k in 0..n - 1 {
+        if mat[k][k].is_zero() {
+            let mut swap_idx = None;
+            for r in k + 1..n {
+                if !mat[r][k].is_zero() {
+                    swap_idx = Some(r);
+                    break;
+                }
+            }
+            match swap_idx {
+                Some(r) => {
+                    mat.swap(k, r);
+                    sign = -sign;
+                }
+                None => return BigI::zero(),
+            }
+        }
+        let prev_pivot = if k == 0 {
+            BigI::one()
+        } else {
+            mat[k - 1][k - 1].clone()
+        };
+        let cur_pivot = mat[k][k].clone();
+        for i in k + 1..n {
+            let mik = mat[i][k].clone();
+            for j in k + 1..n {
+                let num = &(&mat[i][j] * &cur_pivot) - &(&mik * &mat[k][j]);
+                mat[i][j] = &num / &prev_pivot;
+            }
+        }
+    }
+    let det = mat[n - 1][n - 1].clone();
+    if sign < 0 {
+        -det
+    } else {
+        det
+    }
 }
 
 // === Parsing and Formatting ===
@@ -881,33 +986,32 @@ impl<T: PolyCoeff> fmt::Display for Poly<T> {
                 continue;
             }
             let is_neg = c.is_negative();
-            let abs_c_str = format!("{c}");
-            let abs_c = abs_c_str.strip_prefix('-').unwrap_or(&abs_c_str);
-
             if first {
                 if is_neg {
                     write!(f, "-")?;
                 }
                 first = false;
+            } else if is_neg {
+                write!(f, " - ")?;
             } else {
-                if is_neg {
-                    write!(f, " - ")?;
-                } else {
-                    write!(f, " + ")?;
-                }
+                write!(f, " + ")?;
             }
+
+            let abs_c_str = format!("{c}");
+            let abs_c = abs_c_str.trim_start_matches('-');
 
             if i == 0 {
                 write!(f, "{abs_c}")?;
-            } else {
-                if abs_c != "1" {
-                    write!(f, "{abs_c}")?;
-                }
-                if i == 1 {
+            } else if i == 1 {
+                if c.is_one() || abs_c == "1" {
                     write!(f, "x")?;
                 } else {
-                    write!(f, "x^{i}")?;
+                    write!(f, "{abs_c}x")?;
                 }
+            } else if c.is_one() || abs_c == "1" {
+                write!(f, "x^{i}")?;
+            } else {
+                write!(f, "{abs_c}x^{i}")?;
             }
         }
         Ok(())
@@ -916,6 +1020,7 @@ impl<T: PolyCoeff> fmt::Display for Poly<T> {
 
 impl<T: PolyCoeff + FromStr<Err = Error>> FromStr for Poly<T> {
     type Err = Error;
+
     fn from_str(s: &str) -> Result<Self> {
         let s = s.trim();
         if s.is_empty() {
@@ -926,27 +1031,34 @@ impl<T: PolyCoeff + FromStr<Err = Error>> FromStr for Poly<T> {
         }
 
         let mut terms_map: std::collections::BTreeMap<usize, T> = std::collections::BTreeMap::new();
-        let chars: Vec<char> = s.chars().filter(|c| !c.is_whitespace()).collect();
-        let mut i = 0;
-        let n = chars.len();
+        let cleaned = s.replace(" ", "");
 
-        while i < n {
+        let mut pos = 0;
+        let bytes = cleaned.as_bytes();
+        let len = bytes.len();
+
+        while pos < len {
             let mut is_neg = false;
-            if chars[i] == '+' {
-                i += 1;
-            } else if chars[i] == '-' {
+            if bytes[pos] == b'+' {
+                pos += 1;
+            } else if bytes[pos] == b'-' {
                 is_neg = true;
-                i += 1;
+                pos += 1;
             }
-            if i >= n {
+
+            if pos >= len {
                 return Err(Error::EmptyString);
             }
 
-            let start = i;
-            while i < n && chars[i] != '+' && chars[i] != '-' {
-                i += 1;
+            let start = pos;
+            while pos < len && bytes[pos] != b'+' && bytes[pos] != b'-' {
+                pos += 1;
             }
-            let term_str: String = chars[start..i].iter().collect();
+            let term_str = &cleaned[start..pos];
+            if term_str.is_empty() {
+                return Err(Error::EmptyString);
+            }
+
             if let Some(x_pos) = term_str.find('x') {
                 let coeff_part = &term_str[..x_pos];
                 let exp_part = &term_str[x_pos + 1..];
@@ -988,7 +1100,7 @@ impl<T: PolyCoeff + FromStr<Err = Error>> FromStr for Poly<T> {
                 let coeff_val: T = if is_neg {
                     T::from_str(&format!("-{term_str}"))?
                 } else {
-                    T::from_str(&term_str)?
+                    T::from_str(term_str)?
                 };
                 terms_map
                     .entry(0)
@@ -1003,5 +1115,496 @@ impl<T: PolyCoeff + FromStr<Err = Error>> FromStr for Poly<T> {
             coeffs[deg] = c;
         }
         Ok(Poly::new(coeffs))
+    }
+}
+
+// === Exact Real Algebraic Numbers ===
+
+/// An exact real algebraic number defined by a square-free integer polynomial
+/// $P(x)$ and an isolating rational interval $(a, b]$ containing a single real root.
+#[derive(Clone, Debug)]
+pub struct AlgebraicNumber {
+    poly: Poly<BigI>,
+    interval: (BigQ, BigQ),
+}
+
+impl AlgebraicNumber {
+    /// Creates an algebraic number representing an exact rational number $q$.
+    pub fn from_rational(q: BigQ) -> Self {
+        let (n, d) = (q.numer().clone(), q.denom().clone());
+        let d_bigi = BigI::from_parts(false, d);
+        let poly = Poly::new(vec![-n, d_bigi]);
+        let interval = (q.clone(), q);
+        Self { poly, interval }
+    }
+
+    /// Creates an algebraic number representing $\sqrt{q}$ for $q \ge 0$.
+    pub fn sqrt(q: BigQ) -> Option<Self> {
+        if q.numer().is_negative() {
+            return None;
+        }
+        if q.is_zero() {
+            return Some(Self::from_rational(BigQ::zero()));
+        }
+        let (n, d) = (q.numer().clone(), q.denom().clone());
+        let d_bigi = BigI::from_parts(false, d);
+        let poly = Poly::new(vec![-n, BigI::zero(), d_bigi]);
+        let upper = if &q < &BigQ::one() {
+            BigQ::one()
+        } else {
+            &q + &BigQ::one()
+        };
+        let mut alg = Self {
+            poly,
+            interval: (BigQ::zero(), upper),
+        };
+        let quarter = BigQ::new(BigI::one(), BigI::from(4)).unwrap();
+        alg.refine(&quarter);
+        Some(alg)
+    }
+
+    /// Creates an algebraic number representing the $k$-th real root of $P(x)$ (0-indexed).
+    pub fn root_of(poly: Poly<BigI>, k: usize) -> Option<Self> {
+        if poly.is_zero() || poly.degree() == Some(0) {
+            return None;
+        }
+        let q_coeffs: Vec<BigQ> = poly.coeffs().iter().map(|c| BigQ::from(c.clone())).collect();
+        let q_poly = Poly::new(q_coeffs);
+        let roots = q_poly.isolate_real_roots(&BigQ::one());
+        if k >= roots.len() {
+            return None;
+        }
+        let interval = roots[k].clone();
+        let primitive = poly.primitive_part();
+        let mut alg = Self {
+            poly: primitive,
+            interval,
+        };
+        let quarter = BigQ::new(BigI::one(), BigI::from(4)).unwrap();
+        alg.refine(&quarter);
+        Some(alg)
+    }
+
+    /// Accessor for the defining integer polynomial.
+    pub fn poly(&self) -> &Poly<BigI> {
+        &self.poly
+    }
+
+    /// Accessor for the isolating interval $(a, b]$.
+    pub fn interval(&self) -> (BigQ, BigQ) {
+        self.interval.clone()
+    }
+
+    /// Refines the isolating interval until its width is at most `eps`.
+    pub fn refine(&mut self, eps: &BigQ) {
+        if eps.numer().is_negative() || eps.is_zero() {
+            return;
+        }
+        let (mut a, mut b) = self.interval.clone();
+        if a == b {
+            return;
+        }
+        let q_coeffs: Vec<BigQ> = self.poly.coeffs().iter().map(|c| BigQ::from(c.clone())).collect();
+        let q_poly = Poly::new(q_coeffs);
+
+        let two = BigQ::from_integer(BigI::from(2));
+        while &(&b - &a) > eps {
+            let m = &(&a + &b) / &two;
+            let val_m = q_poly.eval(&m);
+            if val_m.is_zero() {
+                a = m.clone();
+                b = m;
+                break;
+            }
+            let val_a = q_poly.eval(&a);
+            let sign_a = if !val_a.numer().is_negative() { 1 } else { -1 };
+            let sign_m = if !val_m.numer().is_negative() { 1 } else { -1 };
+            if sign_a != sign_m {
+                b = m;
+            } else {
+                a = m;
+            }
+        }
+        self.interval = (a, b);
+    }
+
+    /// Computes a rational approximation within `eps` of the exact value.
+    pub fn approx(&self, eps: &BigQ) -> BigQ {
+        let mut copy = self.clone();
+        copy.refine(eps);
+        let two = BigQ::from_integer(BigI::from(2));
+        &(&copy.interval.0 + &copy.interval.1) / &two
+    }
+}
+
+impl PartialEq for AlgebraicNumber {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == core::cmp::Ordering::Equal
+    }
+}
+
+impl Eq for AlgebraicNumber {}
+
+impl PartialOrd for AlgebraicNumber {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for AlgebraicNumber {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        let mut a = self.clone();
+        let mut b = other.clone();
+
+        if a.interval.1 < b.interval.0 {
+            return core::cmp::Ordering::Less;
+        }
+        if b.interval.1 < a.interval.0 {
+            return core::cmp::Ordering::Greater;
+        }
+
+        let two = BigQ::from_integer(BigI::from(2));
+        for _ in 0..100 {
+            let gcd = a.poly.subresultant_gcd(&b.poly);
+            if gcd.degree().unwrap_or(0) > 0 {
+                let q_coeffs: Vec<BigQ> = gcd.coeffs().iter().map(|c| BigQ::from(c.clone())).collect();
+                let q_gcd = Poly::new(q_coeffs);
+                let overlap_l = if a.interval.0 > b.interval.0 { &a.interval.0 } else { &b.interval.0 };
+                let overlap_r = if a.interval.1 < b.interval.1 { &a.interval.1 } else { &b.interval.1 };
+                if overlap_l <= overlap_r {
+                    if q_gcd.eval(overlap_l).is_zero() || q_gcd.eval(overlap_r).is_zero() {
+                        return core::cmp::Ordering::Equal;
+                    }
+                    if overlap_l < overlap_r && q_gcd.count_real_roots_between(overlap_l, overlap_r) > 0 {
+                        return core::cmp::Ordering::Equal;
+                    }
+                }
+            }
+
+            if a.interval.1 < b.interval.0 {
+                return core::cmp::Ordering::Less;
+            }
+            if b.interval.1 < a.interval.0 {
+                return core::cmp::Ordering::Greater;
+            }
+
+            let w_a = &(&a.interval.1 - &a.interval.0) / &two;
+            let w_b = &(&b.interval.1 - &b.interval.0) / &two;
+            if w_a > BigQ::zero() {
+                a.refine(&w_a);
+            }
+            if w_b > BigQ::zero() {
+                b.refine(&w_b);
+            }
+        }
+
+        a.interval.0.cmp(&b.interval.0)
+    }
+}
+
+#[derive(Copy, Clone)]
+enum AlgOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+fn combine_algebraic(a: &AlgebraicNumber, b: &AlgebraicNumber, op: AlgOp) -> AlgebraicNumber {
+    if a.interval.0 == a.interval.1 && b.interval.0 == b.interval.1 {
+        let q = match op {
+            AlgOp::Add => &a.interval.0 + &b.interval.0,
+            AlgOp::Sub => &a.interval.0 - &b.interval.0,
+            AlgOp::Mul => &a.interval.0 * &b.interval.0,
+        };
+        return AlgebraicNumber::from_rational(q);
+    }
+
+    let res_poly = compute_bivariate_resultant(&a.poly, &b.poly, match op {
+        AlgOp::Add => BivOp::Add,
+        AlgOp::Sub => BivOp::Sub,
+        AlgOp::Mul => BivOp::Mul,
+    });
+
+    let q_coeffs: Vec<BigQ> = res_poly.coeffs().iter().map(|c| BigQ::from(c.clone())).collect();
+    let q_poly = Poly::new(q_coeffs);
+    let sq_factors = q_poly.square_free_factorization();
+    let mut sf_q = Poly::one();
+    for (f, _) in sq_factors {
+        sf_q = &sf_q * &f;
+    }
+    let sf_int = Poly::new(sf_q.coeffs().iter().map(|c| c.numer().clone()).collect()).primitive_part();
+
+    let mut a_cur = a.clone();
+    let mut b_cur = b.clone();
+    let mut target_interval = match op {
+        AlgOp::Add => (&a_cur.interval.0 + &b_cur.interval.0, &a_cur.interval.1 + &b_cur.interval.1),
+        AlgOp::Sub => (&a_cur.interval.0 - &b_cur.interval.1, &a_cur.interval.1 - &b_cur.interval.0),
+        AlgOp::Mul => {
+            let pts = [
+                &a_cur.interval.0 * &b_cur.interval.0,
+                &a_cur.interval.0 * &b_cur.interval.1,
+                &a_cur.interval.1 * &b_cur.interval.0,
+                &a_cur.interval.1 * &b_cur.interval.1,
+            ];
+            let mut min_pt = pts[0].clone();
+            let mut max_pt = pts[0].clone();
+            for pt in &pts[1..] {
+                if pt < &min_pt { min_pt = pt.clone(); }
+                if pt > &max_pt { max_pt = pt.clone(); }
+            }
+            (min_pt, max_pt)
+        }
+    };
+
+    let sf_q_eval: Vec<BigQ> = sf_int.coeffs().iter().map(|c| BigQ::from(c.clone())).collect();
+    let sf_poly_q = Poly::new(sf_q_eval);
+
+    let two = BigQ::from_integer(BigI::from(2));
+    for _ in 0..50 {
+        let roots = sf_poly_q.count_real_roots_between(&target_interval.0, &target_interval.1);
+        if roots == 1 {
+            break;
+        }
+        let w_a = &(&a_cur.interval.1 - &a_cur.interval.0) / &two;
+        let w_b = &(&b_cur.interval.1 - &b_cur.interval.0) / &two;
+        if w_a > BigQ::zero() { a_cur.refine(&w_a); }
+        if w_b > BigQ::zero() { b_cur.refine(&w_b); }
+        target_interval = match op {
+            AlgOp::Add => (&a_cur.interval.0 + &b_cur.interval.0, &a_cur.interval.1 + &b_cur.interval.1),
+            AlgOp::Sub => (&a_cur.interval.0 - &b_cur.interval.1, &a_cur.interval.1 - &b_cur.interval.0),
+            AlgOp::Mul => {
+                let pts = [
+                    &a_cur.interval.0 * &b_cur.interval.0,
+                    &a_cur.interval.0 * &b_cur.interval.1,
+                    &a_cur.interval.1 * &b_cur.interval.0,
+                    &a_cur.interval.1 * &b_cur.interval.1,
+                ];
+                let mut min_pt = pts[0].clone();
+                let mut max_pt = pts[0].clone();
+                for pt in &pts[1..] {
+                    if pt < &min_pt { min_pt = pt.clone(); }
+                    if pt > &max_pt { max_pt = pt.clone(); }
+                }
+                (min_pt, max_pt)
+            }
+        };
+    }
+
+    let mut result = AlgebraicNumber {
+        poly: sf_int,
+        interval: target_interval,
+    };
+    let quarter = BigQ::new(BigI::one(), BigI::from(4)).unwrap();
+    result.refine(&quarter);
+    result
+}
+
+#[derive(Copy, Clone)]
+enum BivOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+fn compute_bivariate_resultant(a: &Poly<BigI>, b: &Poly<BigI>, op: BivOp) -> Poly<BigI> {
+    let deg_a = a.degree().unwrap_or(0);
+    let deg_b = b.degree().unwrap_or(0);
+    if deg_a == 0 || deg_b == 0 {
+        return Poly::one();
+    }
+
+    let mut p_y: Vec<Poly<BigI>> = vec![Poly::zero(); deg_a + 1];
+    match op {
+        BivOp::Add => {
+            for (k, ak) in a.coeffs().iter().enumerate() {
+                for j in 0..=k {
+                    let binom = binomial(k, j);
+                    let sign = if j % 2 == 1 { -BigI::one() } else { BigI::one() };
+                    let coeff = ak * &binom * &sign;
+                    let poly_term = Poly::from_monomial(k - j, coeff);
+                    p_y[j] = &p_y[j] + &poly_term;
+                }
+            }
+        }
+        BivOp::Sub => {
+            for (k, ak) in a.coeffs().iter().enumerate() {
+                for j in 0..=k {
+                    let binom = binomial(k, j);
+                    let coeff = ak * &binom;
+                    let poly_term = Poly::from_monomial(k - j, coeff);
+                    p_y[j] = &p_y[j] + &poly_term;
+                }
+            }
+        }
+        BivOp::Mul => {
+            for j in 0..=deg_a {
+                let k = deg_a - j;
+                let ak = a.coeff(k).cloned().unwrap_or_else(BigI::zero);
+                p_y[j] = Poly::from_monomial(k, ak);
+            }
+        }
+    }
+
+    let mut q_y: Vec<Poly<BigI>> = vec![Poly::zero(); deg_b + 1];
+    for (j, bj) in b.coeffs().iter().enumerate() {
+        q_y[j] = Poly::from_monomial(0, bj.clone());
+    }
+
+    let m = deg_a;
+    let n = deg_b;
+    let dim = m + n;
+    let mut mat: Vec<Vec<Poly<BigI>>> = vec![vec![Poly::zero(); dim]; dim];
+
+    for i in 0..n {
+        for j in 0..=m {
+            mat[i][i + j] = p_y[m - j].clone();
+        }
+    }
+    for i in 0..m {
+        for j in 0..=n {
+            mat[n + i][i + j] = q_y[n - j].clone();
+        }
+    }
+
+    poly_matrix_det(&mat)
+}
+
+fn binomial(n: usize, k: usize) -> BigI {
+    if k > n {
+        return BigI::zero();
+    }
+    if k == 0 || k == n {
+        return BigI::one();
+    }
+    let mut res = BigI::one();
+    for i in 1..=k {
+        res = &res * &BigI::from((n - k + i) as i64);
+        res = &res / &BigI::from(i as i64);
+    }
+    res
+}
+
+fn poly_matrix_det(mat: &[Vec<Poly<BigI>>]) -> Poly<BigI> {
+    let n = mat.len();
+    if n == 0 {
+        return Poly::one();
+    }
+    if n == 1 {
+        return mat[0][0].clone();
+    }
+    if n == 2 {
+        return &(&mat[0][0] * &mat[1][1]) - &(&mat[0][1] * &mat[1][0]);
+    }
+    let mut res = Poly::zero();
+    for j in 0..n {
+        if mat[0][j].is_zero() {
+            continue;
+        }
+        let mut sub = Vec::with_capacity(n - 1);
+        for row in &mat[1..] {
+            let mut sub_row = Vec::with_capacity(n - 1);
+            for (col_idx, val) in row.iter().enumerate() {
+                if col_idx != j {
+                    sub_row.push(val.clone());
+                }
+            }
+            sub.push(sub_row);
+        }
+        let sub_det = poly_matrix_det(&sub);
+        let term = &mat[0][j] * &sub_det;
+        if j % 2 == 1 {
+            res = &res - &term;
+        } else {
+            res = &res + &term;
+        }
+    }
+    res
+}
+
+impl Add for &AlgebraicNumber {
+    type Output = AlgebraicNumber;
+    fn add(self, other: Self) -> AlgebraicNumber {
+        combine_algebraic(self, other, AlgOp::Add)
+    }
+}
+
+impl Add for AlgebraicNumber {
+    type Output = AlgebraicNumber;
+    fn add(self, other: Self) -> AlgebraicNumber {
+        &self + &other
+    }
+}
+
+impl Sub for &AlgebraicNumber {
+    type Output = AlgebraicNumber;
+    fn sub(self, other: Self) -> AlgebraicNumber {
+        combine_algebraic(self, other, AlgOp::Sub)
+    }
+}
+
+impl Sub for AlgebraicNumber {
+    type Output = AlgebraicNumber;
+    fn sub(self, other: Self) -> AlgebraicNumber {
+        &self - &other
+    }
+}
+
+impl Neg for &AlgebraicNumber {
+    type Output = AlgebraicNumber;
+    fn neg(self) -> AlgebraicNumber {
+        let neg_coeffs: Vec<BigI> = self.poly.coeffs().iter().enumerate().map(|(i, c)| {
+            if i % 2 == 1 { -c.clone() } else { c.clone() }
+        }).collect();
+        let poly = Poly::new(neg_coeffs);
+        let interval = (-self.interval.1.clone(), -self.interval.0.clone());
+        AlgebraicNumber { poly, interval }
+    }
+}
+
+impl Neg for AlgebraicNumber {
+    type Output = AlgebraicNumber;
+    fn neg(self) -> AlgebraicNumber {
+        -&self
+    }
+}
+
+impl Mul for &AlgebraicNumber {
+    type Output = AlgebraicNumber;
+    fn mul(self, other: Self) -> AlgebraicNumber {
+        combine_algebraic(self, other, AlgOp::Mul)
+    }
+}
+
+impl Mul for AlgebraicNumber {
+    type Output = AlgebraicNumber;
+    fn mul(self, other: Self) -> AlgebraicNumber {
+        &self * &other
+    }
+}
+
+impl core::ops::Div for &AlgebraicNumber {
+    type Output = AlgebraicNumber;
+    fn div(self, other: Self) -> AlgebraicNumber {
+        if other.cmp(&AlgebraicNumber::from_rational(BigQ::zero())) == core::cmp::Ordering::Equal {
+            panic!("division by zero");
+        }
+        let inv_coeffs: Vec<BigI> = other.poly.coeffs().iter().rev().cloned().collect();
+        let inv_poly = Poly::new(inv_coeffs);
+        let inv_int = if other.interval.0.is_zero() || other.interval.1.is_zero() {
+            (BigQ::one() / other.interval.1.clone(), BigQ::one() / other.interval.0.clone())
+        } else {
+            let inv_a = BigQ::one() / other.interval.0.clone();
+            let inv_b = BigQ::one() / other.interval.1.clone();
+            if inv_a < inv_b { (inv_a, inv_b) } else { (inv_b, inv_a) }
+        };
+        let inv_other = AlgebraicNumber { poly: inv_poly, interval: inv_int };
+        self * &inv_other
+    }
+}
+
+impl core::ops::Div for AlgebraicNumber {
+    type Output = AlgebraicNumber;
+    fn div(self, other: Self) -> AlgebraicNumber {
+        &self / &other
     }
 }
