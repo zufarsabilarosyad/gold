@@ -1,9 +1,9 @@
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..be111ef
+index 0000000..1ddeb59
 --- /dev/null
 +++ b/tests/test_result_memoization.py
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,392 @@
 +"""Contract coverage for reusable workflow step results.
 +
 +This suite verifies that deterministic workflow steps can safely reuse
@@ -328,7 +328,11 @@ index 0000000..be111ef
 +    dag_spec = build_test_dag()
 +
 +    await runner_instance.run_async(dag_spec)
-+    assert captured_events[-1][1]["cached"] is False
++    executed_payload = captured_events[-1][1]
++    assert set(executed_payload.keys()) == {"step_id", "output", "cached"}
++    assert executed_payload["step_id"] == "work"
++    assert executed_payload["output"] == {"call": 1, "input": None, "step_id": "work"}
++    assert executed_payload["cached"] is False
 +
 +    captured_events.clear()
 +    await runner_instance.run_async(dag_spec)
@@ -338,8 +342,15 @@ index 0000000..be111ef
 +        LifecycleEvent.STEP_CACHE_HIT,
 +        LifecycleEvent.STEP_SUCCESS,
 +    ]
-+    success_payload = captured_events[-1][1]
++    hit_payload = captured_events[0][1]
++    assert set(hit_payload.keys()) == {"step_id", "cache_key", "output"}
++    assert hit_payload["step_id"] == "work"
++    assert hit_payload["output"] == {"call": 1, "input": None, "step_id": "work"}
++
++    success_payload = captured_events[1][1]
++    assert set(success_payload.keys()) == {"step_id", "output", "cached"}
 +    assert success_payload["step_id"] == "work"
++    assert success_payload["output"] == {"call": 1, "input": None, "step_id": "work"}
 +    assert success_payload["cached"] is True
 +
 +
@@ -387,7 +398,7 @@ index 0000000..be111ef
 +    assert counter.calls == 2
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..716aa0b
+index 0000000..8e34476
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
 @@ -0,0 +1,272 @@
