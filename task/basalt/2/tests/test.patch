@@ -193,8 +193,8 @@ index 0000000..be111ef
 +async def test_result_cache_expires_entries() -> None:
 +    """Verify that entries expire after their TTL has elapsed."""
 +    cache = ResultCache()
-+    await cache.put("ephemeral_key", {"temp": True}, ttl_seconds=0.001)
-+    await asyncio.sleep(0.01)
++    await cache.put("ephemeral_key", {"temp": True}, ttl_seconds=0.01)
++    await asyncio.sleep(0.05)
 +
 +    assert await cache.get("ephemeral_key") is None
 +
@@ -278,11 +278,11 @@ index 0000000..be111ef
 +async def test_ttl_expiry_executes_again() -> None:
 +    """Verify that workflow runner re-executes step when cached result has expired."""
 +    runner_instance, counter = create_test_runner()
-+    expiring_policy = MemoizationPolicySpec(enabled=True, key="ttl_step", ttl_seconds=0.001)
++    expiring_policy = MemoizationPolicySpec(enabled=True, key="ttl_step", ttl_seconds=0.01)
 +    dag_spec = build_test_dag(policy=expiring_policy)
 +
 +    await runner_instance.run_async(dag_spec)
-+    await asyncio.sleep(0.01)
++    await asyncio.sleep(0.05)
 +    await runner_instance.run_async(dag_spec)
 +
 +    assert counter.calls == 2
@@ -434,9 +434,9 @@ index 0000000..716aa0b
 +    """Verify that keys() reports only non-expired live cache keys."""
 +    cache = ResultCache()
 +    await cache.put("persistent_key", {"status": "persists"})
-+    await cache.put("fleeting_key", {"status": "vanishes"}, ttl_seconds=0.001)
++    await cache.put("fleeting_key", {"status": "vanishes"}, ttl_seconds=0.01)
 +
-+    await asyncio.sleep(0.01)
++    await asyncio.sleep(0.05)
 +    active_keys = await cache.keys()
 +
 +    assert active_keys == ["persistent_key"]
