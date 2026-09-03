@@ -1,9 +1,9 @@
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..b8136a3
+index 0000000..532047a
 --- /dev/null
 +++ b/tests/test_result_memoization.py
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,153 @@
 +"""Contract coverage for reusable workflow step results."""
 +
 +import asyncio
@@ -12,7 +12,7 @@ index 0000000..b8136a3
 +
 +from basalt.core.dag.ast import DAGSpec, ExecutorType, MemoizationPolicySpec, StepSpec
 +from basalt.core.engine.hooks import HookRegistry, LifecycleEvent
-+from basalt.core.engine.memoization import ResultCache, make_cache_key
++from basalt.core.engine.memoization import ResultCache
 +from basalt.core.engine.runner import WorkflowRunner
 +from basalt.core.executors.base import BaseExecutor
 +from basalt.core.executors.pool import ExecutorFactory, WorkerPool
@@ -47,18 +47,30 @@ index 0000000..b8136a3
 +def test_memo_policy_defaults_disabled():
 +    assert MemoizationPolicySpec().enabled is False
 +
-+def test_memo_policy_accepts_ttl():
-+    assert MemoizationPolicySpec(enabled=True, ttl_seconds=1).ttl_seconds == 1
++def test_memo_policy_rejects_nonpositive_ttl():
++    with pytest.raises(ValueError):
++        MemoizationPolicySpec(enabled=True, ttl_seconds=0)
 +
-+def test_cache_key_is_stable_for_same_context():
-+    from basalt.core.engine.context import ExecutionContext
-+    step = dag().steps[0]
-+    assert make_cache_key(step, ExecutionContext("a", "memo_dag", {"x": 1})) == make_cache_key(step, ExecutionContext("b", "memo_dag", {"x": 1}))
++@pytest.mark.asyncio
++async def test_executable_definition_changes_cache_identity():
++    r, count = runner()
++    first = dag(); second = dag()
++    first.steps[0].parameters = {"version": 1}
++    second.steps[0].parameters = {"version": 2}
++    await r.run_async(first); await r.run_async(second)
++    assert count.calls == 2
 +
-+def test_cache_key_changes_when_inputs_change():
-+    from basalt.core.engine.context import ExecutionContext
-+    step = dag().steps[0]
-+    assert make_cache_key(step, ExecutionContext("a", "memo_dag", {"x": 1})) != make_cache_key(step, ExecutionContext("a", "memo_dag", {"x": 2}))
++@pytest.mark.asyncio
++async def test_dependency_output_changes_cache_identity():
++    r, count = runner()
++    child_policy = MemoizationPolicySpec(enabled=True, key="child", include_inputs=False)
++    graph = DAGSpec(id="deps", steps=[
++        StepSpec(id="parent", executor_type=ExecutorType.CUSTOM),
++        StepSpec(id="child", executor_type=ExecutorType.CUSTOM,
++                 depends_on=["parent"], memoization=child_policy),
++    ])
++    await r.run_async(graph, {"value": 1}); await r.run_async(graph, {"value": 2})
++    assert count.calls == 4
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_put_and_get():
@@ -82,7 +94,8 @@ index 0000000..b8136a3
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_stats_track_hits_and_misses():
-+    cache = ResultCache(); await cache.get("missing"); await cache.put("a", {}); await cache.get("a"); assert (await cache.stats())["hits"] == 1
++    cache = ResultCache(); await cache.get("missing"); await cache.put("a", {}); await cache.get("a")
++    assert await cache.stats() == {"entries": 1, "hits": 1, "misses": 1}
 +
 +@pytest.mark.asyncio
 +async def test_enabled_step_reuses_result_across_runs():
@@ -110,11 +123,24 @@ index 0000000..b8136a3
 +
 +@pytest.mark.asyncio
 +async def test_cache_hit_emits_lifecycle_event():
-+    seen=[]; hooks=HookRegistry(); hooks.register(LifecycleEvent.STEP_CACHE_HIT, lambda e,c,p: seen.append(p)); r,_ = runner(hooks=hooks); await r.run_async(dag()); await r.run_async(dag()); assert seen[0]["step_id"] == "work"
++    seen=[]; hooks=HookRegistry()
++    hooks.register(LifecycleEvent.STEP_CACHE_HIT, lambda e,c,p: seen.append((e,p)))
++    r,_ = runner(hooks=hooks); await r.run_async(dag()); await r.run_async(dag())
++    event, payload = seen[0]
++    assert event == LifecycleEvent.STEP_CACHE_HIT
++    assert set(payload) == {"step_id", "cache_key", "output"}
++    assert payload["step_id"] == "work" and len(payload["cache_key"]) == 64
 +
 +@pytest.mark.asyncio
 +async def test_cache_hit_success_payload_marks_cached():
-+    seen=[]; hooks=HookRegistry(); hooks.register(LifecycleEvent.STEP_SUCCESS, lambda e,c,p: seen.append(p)); r,_ = runner(hooks=hooks); await r.run_async(dag()); await r.run_async(dag()); assert seen[-1]["cached"] is True
++    seen=[]; hooks=HookRegistry()
++    for event in (LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS):
++        hooks.register(event, lambda e,c,p: seen.append((e,p)))
++    r,_ = runner(hooks=hooks); await r.run_async(dag())
++    assert seen[-1][1]["cached"] is False
++    seen.clear(); await r.run_async(dag())
++    assert [event for event, _ in seen] == [LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS]
++    assert seen[-1][1] == {"step_id": "work", "output": {"call": 1, "input": None}, "cached": True}
 +
 +@pytest.mark.asyncio
 +async def test_cached_parent_allows_dependent_step():
@@ -133,17 +159,38 @@ index 0000000..b8136a3
 +    r, count=runner(Bad()); await r.run_async(dag()); await r.run_async(dag()); assert count.calls == 2
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..cebd883
+index 0000000..22d7922
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,481 @@
-+"""Additional contract data for memoization serialization boundaries."""
+@@ -0,0 +1,502 @@
++"""Additional contract coverage for the public ResultCache surface."""
 +
-+from basalt.core.engine.memoization_serialization import dump_output, load_output
++import pytest
++
++from basalt.core.engine.memoization import ResultCache
 +
 +
-+def test_serialized_memoized_output_round_trips():
-+    assert load_output(dump_output({"result": 1})) == {"result": 1}
++@pytest.mark.asyncio
++async def test_keys_only_lists_live_entries():
++    cache = ResultCache()
++    await cache.put("one", {"result": 1})
++    await cache.put("two", {"result": 2}, ttl_seconds=0.001)
++    import asyncio
++    await asyncio.sleep(0.01)
++    assert await cache.keys() == ["one"]
++
++
++@pytest.mark.asyncio
++async def test_invalidate_missing_key_reports_false():
++    assert await ResultCache().invalidate("missing") is False
++
++
++@pytest.mark.asyncio
++async def test_clear_leaves_zero_entries():
++    cache = ResultCache()
++    await cache.put("one", {})
++    await cache.clear()
++    assert await cache.stats() == {"entries": 0, "hits": 0, "misses": 0}
 +
 +
 +CONTRACT_NOTES = [
