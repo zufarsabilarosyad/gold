@@ -6,5 +6,4 @@ Preserve `fail_fast` as the default behavior: terminally failed steps skip all r
 
 Cancelling an active run—whether inside a running task or during a retry backoff sleep—must abort immediately, prevent any future attempts, and leave the workflow in a `CANCELLED` state. Finally, track and persist per-step attempt counts in SQLite storage, and include them in the run status API responses and CLI output.
 
-Please develop this in a new branch off `main` and commit your final changes.
-
+IMPORTANT: Please work on this in a new branch from main and commit everything when you are done.
