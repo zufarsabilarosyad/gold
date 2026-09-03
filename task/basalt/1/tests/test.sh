@@ -24,16 +24,16 @@ if [ -d "/app/.venv/bin" ]; then
 fi
 export PYTHONPATH="/app/src:${PYTHONPATH:-}"
 
-git checkout -q 69686949e6162606cc54293dc2af217d63161577 -- pyproject.toml tests/conftest.py 2>/dev/null || true
+git checkout -q 69686949e6162606cc54293dc2af217d63161577 -- tests/conftest.py 2>/dev/null || true
 
 set +e
-PYTEST_ADDOPTS="-p no:cacheprovider -o pythonpath=src --junitxml=/logs/verifier/base.xml" run_log python3 -m pytest -q \
+PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto -o pythonpath=src --junitxml=/logs/verifier/base.xml" run_log python3 -m pytest -q \
   tests/test_api_routes.py tests/test_cli_commands.py tests/test_context_evaluator.py \
   tests/test_dag_parser.py tests/test_dag_sorter.py tests/test_engine.py \
   tests/test_engine_integration.py tests/test_executors.py tests/test_resilience.py \
   tests/test_state_machine.py tests/test_storage_repository.py tests/test_triggers.py \
   tests/test_worker_pool.py
-PYTEST_ADDOPTS="-p no:cacheprovider -o pythonpath=src --junitxml=/logs/verifier/new.xml" run_log python3 -m pytest -q \
+PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto -o pythonpath=src --junitxml=/logs/verifier/new.xml" run_log python3 -m pytest -q \
   tests/test_retry_policies.py tests/test_failure_continuation.py
 set -e
 # >>> END RUN TESTS <<<
