@@ -152,7 +152,7 @@ new file mode 100644
 index 0000000..7cefdda
 --- /dev/null
 +++ b/src/basalt/core/engine/retry_control.py
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,294 @@
 +"""Reusable policy control for retryable workflow step execution.
 +
 +The runner owns DAG ordering; this module owns the state machine that
@@ -177,6 +177,8 @@ index 0000000..7cefdda
 +AttemptResult = tuple[StepState, dict[str, Any], str | None]
 +AttemptCallable = Callable[[], Awaitable[AttemptResult]]
 +RetryCallback = Callable[[int, str | None, float], Awaitable[None]]
++RETRYABLE_STEP_STATES = frozenset((StepState.FAILED, StepState.TIMEOUT))
++
 +
 +
 +@dataclass(frozen=True)
@@ -276,7 +278,7 @@ index 0000000..7cefdda
 +
 +    def can_retry(self, attempt: int, state: StepState) -> bool:
 +        """Only failed and timed-out attempts consume the retry budget."""
-+        return state in {StepState.FAILED, StepState.TIMEOUT} and attempt <= self.max_retries
++        return state in RETRYABLE_STEP_STATES and attempt <= self.max_retries
 +
 +    def delay_for(self, attempt: int) -> float:
 +        """Return the wait after a failed one-based attempt."""

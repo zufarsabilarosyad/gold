@@ -1,12 +1,19 @@
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..d25d70d
+index 0000000..be111ef
 --- /dev/null
 +++ b/tests/test_result_memoization.py
-@@ -0,0 +1,262 @@
-+"""Contract coverage for reusable workflow step results."""
+@@ -0,0 +1,381 @@
++"""Contract coverage for reusable workflow step results.
++
++This suite verifies that deterministic workflow steps can safely reuse
++prior successful execution outputs while ensuring data isolation and
++correct lifecycle hook dispatching.
++"""
 +
 +import asyncio
++from typing import Any
++
 +import pytest
 +
 +from basalt.core.dag.ast import DAGSpec, ExecutorType, MemoizationPolicySpec, StepSpec
@@ -17,36 +24,65 @@ index 0000000..d25d70d
 +from basalt.core.executors.pool import ExecutorFactory, WorkerPool
 +
 +
-+class Counter(BaseExecutor):
-+    def __init__(self):
++class CallCountingExecutor(BaseExecutor):
++    """Custom step executor tracking execution count and returning inputs."""
++
++    def __init__(self) -> None:
 +        super().__init__("custom")
-+        self.calls = 0
++        self.calls: int = 0
 +
-+    async def execute(self, step, context):
++    async def execute(self, step: StepSpec, context: Any) -> dict[str, Any]:
 +        self.calls += 1
-+        return {"call": self.calls, "input": context.inputs.get("value")}
++        return {
++            "call": self.calls,
++            "input": context.inputs.get("value"),
++            "step_id": step.id,
++        }
 +
 +
-+def runner(counter=None, hooks=None, cache=None):
-+    counter = counter or Counter()
++def create_test_runner(
++    executor: BaseExecutor | None = None,
++    hooks: HookRegistry | None = None,
++    cache: ResultCache | None = None,
++) -> tuple[WorkflowRunner, CallCountingExecutor]:
++    """Build a test workflow runner with an isolated executor factory."""
++    counting_executor = executor or CallCountingExecutor()
 +    factory = ExecutorFactory()
-+    factory.register("custom", counter)
-+    return WorkflowRunner(WorkerPool(factory=factory), hooks or HookRegistry(), cache), counter
++    factory.register("custom", counting_executor)
++    worker_pool = WorkerPool(factory=factory)
++    runner_instance = WorkflowRunner(
++        worker_pool=worker_pool,
++        hook_registry=hooks or HookRegistry(),
++        result_cache=cache,
++    )
++    return runner_instance, counting_executor
 +
 +
-+def dag(policy=None, depends=False, key="shared"):
-+    first = StepSpec(
++def build_test_dag(
++    policy: MemoizationPolicySpec | None = None,
++    include_dependent_step: bool = False,
++    cache_key: str = "shared",
++) -> DAGSpec:
++    """Construct a minimal DAG specification for memoization testing."""
++    first_step = StepSpec(
 +        id="work",
 +        executor_type=ExecutorType.CUSTOM,
-+        memoization=policy or MemoizationPolicySpec(enabled=True, key=key),
++        memoization=policy or MemoizationPolicySpec(enabled=True, key=cache_key),
 +    )
-+    steps = [first]
-+    if depends:
-+        steps.append(StepSpec(id="after", executor_type=ExecutorType.CUSTOM, depends_on=["work"]))
++    steps = [first_step]
++    if include_dependent_step:
++        steps.append(
++            StepSpec(
++                id="after",
++                executor_type=ExecutorType.CUSTOM,
++                depends_on=["work"],
++            )
++        )
 +    return DAGSpec(id="memo_dag", steps=steps)
 +
 +
-+def test_memo_policy_defaults_disabled():
++def test_memo_policy_defaults_disabled() -> None:
++    """Verify that memoization is disabled by default with standard defaults."""
 +    policy = MemoizationPolicySpec()
 +    assert policy.enabled is False
 +    assert policy.key is None
@@ -54,28 +90,35 @@ index 0000000..d25d70d
 +    assert policy.include_inputs is True
 +
 +
-+def test_memo_policy_rejects_nonpositive_ttl():
++def test_memo_policy_rejects_nonpositive_ttl() -> None:
++    """Verify that zero or negative TTL seconds values are rejected."""
 +    with pytest.raises(ValueError):
 +        MemoizationPolicySpec(enabled=True, ttl_seconds=0)
 +    with pytest.raises(ValueError):
 +        MemoizationPolicySpec(enabled=True, ttl_seconds=-1.0)
++    with pytest.raises(ValueError):
++        MemoizationPolicySpec(enabled=True, ttl_seconds=-0.001)
 +
 +
 +@pytest.mark.asyncio
-+async def test_executable_definition_changes_cache_identity():
-+    runner_instance, counter = runner()
-+    first_dag = dag()
-+    second_dag = dag()
++async def test_executable_definition_changes_cache_identity() -> None:
++    """Verify that altering step parameters alters cache identity."""
++    runner_instance, counter = create_test_runner()
++    first_dag = build_test_dag()
++    second_dag = build_test_dag()
 +    first_dag.steps[0].parameters = {"version": 1}
 +    second_dag.steps[0].parameters = {"version": 2}
++
 +    await runner_instance.run_async(first_dag)
 +    await runner_instance.run_async(second_dag)
++
 +    assert counter.calls == 2
 +
 +
 +@pytest.mark.asyncio
-+async def test_dependency_output_changes_cache_identity():
-+    runner_instance, counter = runner()
++async def test_dependency_output_changes_cache_identity() -> None:
++    """Verify that changes in upstream dependency outputs invalidate step cache."""
++    runner_instance, counter = create_test_runner()
 +    child_policy = MemoizationPolicySpec(enabled=True, key="child", include_inputs=False)
 +    graph = DAGSpec(
 +        id="deps",
@@ -89,218 +132,472 @@ index 0000000..d25d70d
 +            ),
 +        ],
 +    )
++
 +    await runner_instance.run_async(graph, {"value": 1})
 +    await runner_instance.run_async(graph, {"value": 2})
++
 +    assert counter.calls == 4
 +
 +
 +@pytest.mark.asyncio
-+async def test_result_cache_put_and_get():
++async def test_result_cache_put_and_get() -> None:
++    """Verify basic insertion and retrieval from ResultCache."""
 +    cache = ResultCache()
-+    await cache.put("a", {"x": 1})
-+    assert await cache.get("a") == {"x": 1}
++    await cache.put("test_key", {"x": 1})
++    retrieved = await cache.get("test_key")
++    assert retrieved == {"x": 1}
 +
 +
 +@pytest.mark.asyncio
-+async def test_result_cache_returns_copies():
++async def test_result_cache_returns_copies() -> None:
++    """Verify that ResultCache performs deep copying at boundary methods."""
 +    cache = ResultCache()
-+    original_input = {"x": []}
-+    await cache.put("a", original_input)
-+    original_input["x"].append(2)
-+    assert await cache.get("a") == {"x": []}
-+    retrieved = await cache.get("a")
-+    retrieved["x"].append(1)
-+    assert await cache.get("a") == {"x": []}
++    original_input = {"nested": [1, 2, 3]}
++
++    await cache.put("boundary_key", original_input)
++    original_input["nested"].append(999)
++
++    cached_entry = await cache.get("boundary_key")
++    assert cached_entry == {"nested": [1, 2, 3]}
++
++    cached_entry["nested"].append(888)
++    second_retrieval = await cache.get("boundary_key")
++    assert second_retrieval == {"nested": [1, 2, 3]}
 +
 +
 +@pytest.mark.asyncio
-+async def test_result_cache_invalidates_entry():
++async def test_result_cache_invalidates_entry() -> None:
++    """Verify that explicit invalidation removes existing entries."""
 +    cache = ResultCache()
-+    await cache.put("a", {"status": "ok"})
-+    assert await cache.invalidate("a") is True
-+    assert await cache.get("a") is None
++    await cache.put("key_to_remove", {"active": True})
++    was_removed = await cache.invalidate("key_to_remove")
++
++    assert was_removed is True
++    assert await cache.get("key_to_remove") is None
 +
 +
 +@pytest.mark.asyncio
-+async def test_result_cache_clear_reports_count():
++async def test_result_cache_clear_reports_count() -> None:
++    """Verify that clear removes all stored entries and returns the count."""
 +    cache = ResultCache()
-+    await cache.put("a", {})
-+    await cache.put("b", {})
-+    assert await cache.clear() == 2
-+    assert await cache.get("a") is None
-+    assert await cache.get("b") is None
++    await cache.put("key_a", {"item": 1})
++    await cache.put("key_b", {"item": 2})
++
++    cleared_count = await cache.clear()
++    assert cleared_count == 2
++    assert await cache.get("key_a") is None
++    assert await cache.get("key_b") is None
 +
 +
 +@pytest.mark.asyncio
-+async def test_result_cache_expires_entries():
++async def test_result_cache_expires_entries() -> None:
++    """Verify that entries expire after their TTL has elapsed."""
 +    cache = ResultCache()
-+    await cache.put("a", {"data": 1}, ttl_seconds=0.001)
++    await cache.put("ephemeral_key", {"temp": True}, ttl_seconds=0.001)
 +    await asyncio.sleep(0.01)
-+    assert await cache.get("a") is None
++
++    assert await cache.get("ephemeral_key") is None
 +
 +
 +@pytest.mark.asyncio
-+async def test_result_cache_stats_track_hits_and_misses():
++async def test_result_cache_stats_track_hits_and_misses() -> None:
++    """Verify that cache statistics track entries, hits, and misses accurately."""
 +    cache = ResultCache()
-+    await cache.get("missing")
-+    await cache.put("a", {})
-+    await cache.get("a")
-+    assert await cache.stats() == {"entries": 1, "hits": 1, "misses": 1}
++    await cache.get("missing_key")
++    await cache.put("valid_key", {"data": 123})
++    await cache.get("valid_key")
++
++    stats = await cache.stats()
++    assert stats == {"entries": 1, "hits": 1, "misses": 1}
 +
 +
 +@pytest.mark.asyncio
-+async def test_enabled_step_reuses_result_across_runs():
-+    runner_instance, counter = runner()
-+    d = dag()
-+    await runner_instance.run_async(d, {"value": 1})
-+    second_run = await runner_instance.run_async(d, {"value": 1})
++async def test_enabled_step_reuses_result_across_runs() -> None:
++    """Verify that a step with enabled memoization reuses results on equivalent runs."""
++    runner_instance, counter = create_test_runner()
++    dag_spec = build_test_dag()
++
++    first_result = await runner_instance.run_async(dag_spec, {"value": 1})
++    second_result = await runner_instance.run_async(dag_spec, {"value": 1})
++
 +    assert counter.calls == 1
-+    assert second_run.outputs["work"]["call"] == 1
++    assert first_result.outputs["work"]["call"] == 1
++    assert second_result.outputs["work"]["call"] == 1
 +
 +
 +@pytest.mark.asyncio
-+async def test_disabled_step_always_executes():
-+    runner_instance, counter = runner()
-+    d = dag(MemoizationPolicySpec(enabled=False))
-+    await runner_instance.run_async(d)
-+    await runner_instance.run_async(d)
++async def test_disabled_step_always_executes() -> None:
++    """Verify that steps with disabled memoization execute on every run."""
++    runner_instance, counter = create_test_runner()
++    disabled_policy = MemoizationPolicySpec(enabled=False)
++    dag_spec = build_test_dag(policy=disabled_policy)
++
++    await runner_instance.run_async(dag_spec)
++    await runner_instance.run_async(dag_spec)
++
 +    assert counter.calls == 2
 +
 +
 +@pytest.mark.asyncio
-+async def test_changed_inputs_miss_cache():
-+    runner_instance, counter = runner()
-+    d = dag()
-+    await runner_instance.run_async(d, {"value": 1})
-+    await runner_instance.run_async(d, {"value": 2})
++async def test_changed_inputs_miss_cache() -> None:
++    """Verify that changing workflow inputs results in a cache miss when inputs included."""
++    runner_instance, counter = create_test_runner()
++    dag_spec = build_test_dag()
++
++    await runner_instance.run_async(dag_spec, {"value": 1})
++    await runner_instance.run_async(dag_spec, {"value": 2})
++
 +    assert counter.calls == 2
 +
 +
 +@pytest.mark.asyncio
-+async def test_include_inputs_false_reuses_across_inputs():
-+    runner_instance, counter = runner()
-+    d = dag(MemoizationPolicySpec(enabled=True, key="x", include_inputs=False))
-+    await runner_instance.run_async(d, {"value": 1})
-+    await runner_instance.run_async(d, {"value": 2})
++async def test_include_inputs_false_reuses_across_inputs() -> None:
++    """Verify that disabling include_inputs allows reuse across different workflow inputs."""
++    runner_instance, counter = create_test_runner()
++    policy = MemoizationPolicySpec(enabled=True, key="ignore_inputs", include_inputs=False)
++    dag_spec = build_test_dag(policy=policy)
++
++    await runner_instance.run_async(dag_spec, {"value": 1})
++    await runner_instance.run_async(dag_spec, {"value": 2})
++
 +    assert counter.calls == 1
 +
 +
 +@pytest.mark.asyncio
-+async def test_changed_key_is_a_different_cache_namespace():
-+    runner_instance, counter = runner()
-+    await runner_instance.run_async(dag(key="one"))
-+    await runner_instance.run_async(dag(key="two"))
++async def test_changed_key_is_a_different_cache_namespace() -> None:
++    """Verify that distinct explicit keys form isolated cache namespaces."""
++    runner_instance, counter = create_test_runner()
++
++    await runner_instance.run_async(build_test_dag(cache_key="ns_alpha"))
++    await runner_instance.run_async(build_test_dag(cache_key="ns_beta"))
++
 +    assert counter.calls == 2
 +
 +
 +@pytest.mark.asyncio
-+async def test_ttl_expiry_executes_again():
-+    runner_instance, counter = runner()
-+    d = dag(MemoizationPolicySpec(enabled=True, key="ttl", ttl_seconds=0.001))
-+    await runner_instance.run_async(d)
++async def test_ttl_expiry_executes_again() -> None:
++    """Verify that workflow runner re-executes step when cached result has expired."""
++    runner_instance, counter = create_test_runner()
++    expiring_policy = MemoizationPolicySpec(enabled=True, key="ttl_step", ttl_seconds=0.001)
++    dag_spec = build_test_dag(policy=expiring_policy)
++
++    await runner_instance.run_async(dag_spec)
 +    await asyncio.sleep(0.01)
-+    await runner_instance.run_async(d)
++    await runner_instance.run_async(dag_spec)
++
 +    assert counter.calls == 2
 +
 +
 +@pytest.mark.asyncio
-+async def test_cache_hit_emits_lifecycle_event():
-+    seen = []
++async def test_cache_hit_emits_lifecycle_event() -> None:
++    """Verify that cache hit triggers STEP_CACHE_HIT with the required payload fields."""
++    captured_events: list[tuple[Any, dict[str, Any]]] = []
 +    hooks = HookRegistry()
-+    hooks.register(LifecycleEvent.STEP_CACHE_HIT, lambda e, c, p: seen.append((e, p)))
-+    runner_instance, _ = runner(hooks=hooks)
-+    await runner_instance.run_async(dag())
-+    await runner_instance.run_async(dag())
-+    assert len(seen) >= 1
-+    event, payload = seen[0]
-+    assert event == LifecycleEvent.STEP_CACHE_HIT
++    hooks.register(
++        LifecycleEvent.STEP_CACHE_HIT,
++        lambda event, context, payload: captured_events.append((event, payload)),
++    )
++
++    runner_instance, _ = create_test_runner(hooks=hooks)
++    dag_spec = build_test_dag()
++
++    await runner_instance.run_async(dag_spec)
++    await runner_instance.run_async(dag_spec)
++
++    assert len(captured_events) >= 1
++    event_type, payload = captured_events[0]
++    assert event_type == LifecycleEvent.STEP_CACHE_HIT
 +    assert set(payload.keys()) == {"step_id", "cache_key", "output"}
 +    assert payload["step_id"] == "work"
 +    assert isinstance(payload["cache_key"], str) and len(payload["cache_key"]) > 0
++    assert payload["output"]["call"] == 1
 +
 +
 +@pytest.mark.asyncio
-+async def test_cache_hit_success_payload_marks_cached():
-+    seen = []
++async def test_cache_hit_success_payload_marks_cached() -> None:
++    """Verify that STEP_SUCCESS payload reports cached: True on hit and False on execution."""
++    captured_events: list[tuple[Any, dict[str, Any]]] = []
 +    hooks = HookRegistry()
-+    for event in (LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS):
-+        hooks.register(event, lambda e, c, p: seen.append((e, p)))
-+    runner_instance, _ = runner(hooks=hooks)
-+    await runner_instance.run_async(dag())
-+    assert seen[-1][1]["cached"] is False
-+    seen.clear()
-+    await runner_instance.run_async(dag())
-+    events = [event for event, _ in seen]
-+    assert events == [LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS]
-+    assert seen[-1][1] == {"step_id": "work", "output": {"call": 1, "input": None}, "cached": True}
++    for event_type in (LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS):
++        hooks.register(
++            event_type,
++            lambda event, context, payload: captured_events.append((event, payload)),
++        )
++
++    runner_instance, _ = create_test_runner(hooks=hooks)
++    dag_spec = build_test_dag()
++
++    await runner_instance.run_async(dag_spec)
++    assert captured_events[-1][1]["cached"] is False
++
++    captured_events.clear()
++    await runner_instance.run_async(dag_spec)
++
++    dispatched_events = [ev for ev, _ in captured_events]
++    assert dispatched_events == [
++        LifecycleEvent.STEP_CACHE_HIT,
++        LifecycleEvent.STEP_SUCCESS,
++    ]
++    success_payload = captured_events[-1][1]
++    assert success_payload["step_id"] == "work"
++    assert success_payload["cached"] is True
 +
 +
 +@pytest.mark.asyncio
-+async def test_cached_parent_allows_dependent_step():
-+    runner_instance, counter = runner()
-+    d = dag(depends=True)
-+    await runner_instance.run_async(d)
-+    out = await runner_instance.run_async(d)
-+    assert out.outputs["after"] is not None
++async def test_cached_parent_allows_dependent_step() -> None:
++    """Verify that a memoized parent step supplies its output to dependent child steps."""
++    runner_instance, counter = create_test_runner()
++    dag_with_dep = build_test_dag(include_dependent_step=True)
++
++    await runner_instance.run_async(dag_with_dep)
++    second_run = await runner_instance.run_async(dag_with_dep)
++
++    assert second_run.outputs["after"] is not None
 +    assert counter.calls == 3
 +
 +
 +@pytest.mark.asyncio
-+async def test_cache_can_be_shared_between_runners():
-+    cache = ResultCache()
-+    first_runner, counter = runner(cache=cache)
-+    second_runner, _ = runner(counter=counter, cache=cache)
-+    await first_runner.run_async(dag())
-+    await second_runner.run_async(dag())
++async def test_cache_can_be_shared_between_runners() -> None:
++    """Verify that a single ResultCache instance can be shared across multiple runners."""
++    shared_cache = ResultCache()
++    first_runner, counter = create_test_runner(cache=shared_cache)
++    second_runner, _ = create_test_runner(executor=counter, cache=shared_cache)
++    dag_spec = build_test_dag()
++
++    await first_runner.run_async(dag_spec)
++    await second_runner.run_async(dag_spec)
++
 +    assert counter.calls == 1
 +
 +
 +@pytest.mark.asyncio
-+async def test_failed_work_is_not_cached():
-+    class FailingExecutor(Counter):
-+        async def execute(self, step, context):
++async def test_failed_work_is_not_cached() -> None:
++    """Verify that step execution failures are never stored in the result cache."""
++    class ErrorRaisingExecutor(CallCountingExecutor):
++        async def execute(self, step: StepSpec, context: Any) -> dict[str, Any]:
 +            self.calls += 1
-+            raise RuntimeError("Step failed intentionally")
++            raise RuntimeError("Intentional step failure for memoization test")
 +
-+    runner_instance, counter = runner(FailingExecutor())
-+    await runner_instance.run_async(dag())
-+    await runner_instance.run_async(dag())
++    runner_instance, counter = create_test_runner(executor=ErrorRaisingExecutor())
++    dag_spec = build_test_dag()
++
++    await runner_instance.run_async(dag_spec)
++    await runner_instance.run_async(dag_spec)
++
 +    assert counter.calls == 2
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..3345105
+index 0000000..8d496ff
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,32 @@
-+"""Additional contract coverage for the public ResultCache surface."""
+@@ -0,0 +1,210 @@
++"""Additional contract coverage for the public ResultCache surface.
++
++This module validates detailed boundary contracts for ResultCache methods,
++key namespace management, statistics isolation, and workflow interaction.
++"""
 +
 +import asyncio
++from typing import Any
++
 +import pytest
 +
++from basalt.core.dag.ast import DAGSpec, ExecutorType, MemoizationPolicySpec, StepSpec
++from basalt.core.engine.hooks import HookRegistry, LifecycleEvent
 +from basalt.core.engine.memoization import ResultCache
++from basalt.core.engine.runner import WorkflowRunner
++from basalt.core.executors.base import BaseExecutor
++from basalt.core.executors.pool import ExecutorFactory, WorkerPool
++
++
++class DedicatedWorker(BaseExecutor):
++    """Worker recording execution sequence and arguments."""
++
++    def __init__(self) -> None:
++        super().__init__("custom")
++        self.invocation_count: int = 0
++        self.history: list[dict[str, Any]] = []
++
++    async def execute(self, step: StepSpec, context: Any) -> dict[str, Any]:
++        self.invocation_count += 1
++        output = {
++            "index": self.invocation_count,
++            "step_name": step.id,
++            "params": step.parameters.copy() if step.parameters else {},
++        }
++        self.history.append(output)
++        return output
 +
 +
 +@pytest.mark.asyncio
-+async def test_keys_only_lists_live_entries():
++async def test_keys_only_lists_live_entries() -> None:
++    """Verify that keys() reports only non-expired live cache keys."""
 +    cache = ResultCache()
-+    await cache.put("one", {"result": 1})
-+    await cache.put("two", {"result": 2}, ttl_seconds=0.001)
++    await cache.put("persistent_key", {"status": "persists"})
++    await cache.put("fleeting_key", {"status": "vanishes"}, ttl_seconds=0.001)
++
 +    await asyncio.sleep(0.01)
-+    assert await cache.keys() == ["one"]
++    active_keys = await cache.keys()
++
++    assert active_keys == ["persistent_key"]
 +
 +
 +@pytest.mark.asyncio
-+async def test_invalidate_missing_key_reports_false():
++async def test_invalidate_missing_key_reports_false() -> None:
++    """Verify that invalidating a non-existent key returns False."""
 +    cache = ResultCache()
-+    assert await cache.invalidate("missing") is False
++    result = await cache.invalidate("non_existent_key")
++    assert result is False
 +
 +
 +@pytest.mark.asyncio
-+async def test_clear_leaves_zero_entries():
++async def test_clear_leaves_zero_entries() -> None:
++    """Verify that clear() resets all stored cache entries to zero."""
 +    cache = ResultCache()
-+    await cache.put("one", {})
-+    await cache.put("two", {})
-+    cleared = await cache.clear()
-+    assert cleared == 2
-+    assert await cache.stats() == {"entries": 0, "hits": 0, "misses": 0}
++    await cache.put("item_alpha", {"val": 1})
++    await cache.put("item_beta", {"val": 2})
++
++    total_removed = await cache.clear()
++
++    assert total_removed == 2
 +    assert await cache.keys() == []
++    stats = await cache.stats()
++    assert stats == {"entries": 0, "hits": 0, "misses": 0}
++
++
++@pytest.mark.asyncio
++async def test_result_cache_overwriting_existing_key() -> None:
++    """Verify that storing a new value for an existing key updates the cache entry."""
++    cache = ResultCache()
++    await cache.put("shared_key", {"generation": 1})
++    first_read = await cache.get("shared_key")
++    assert first_read == {"generation": 1}
++
++    await cache.put("shared_key", {"generation": 2})
++    second_read = await cache.get("shared_key")
++    assert second_read == {"generation": 2}
++
++    stats = await cache.stats()
++    assert stats["entries"] == 1
++
++
++@pytest.mark.asyncio
++async def test_result_cache_deep_copy_isolation_nested_structures() -> None:
++    """Verify that complex nested lists and dicts remain completely isolated."""
++    cache = ResultCache()
++    complex_data = {
++        "metadata": {"version": 1, "tags": ["a", "b"]},
++        "records": [{"id": 101, "scores": [95, 88]}],
++    }
++
++    await cache.put("complex_key", complex_data)
++    complex_data["metadata"]["tags"].append("c")
++    complex_data["records"][0]["scores"].append(100)
++
++    stored = await cache.get("complex_key")
++    assert stored["metadata"]["tags"] == ["a", "b"]
++    assert stored["records"][0]["scores"] == [95, 88]
++
++
++@pytest.mark.asyncio
++async def test_result_cache_stats_hit_miss_counter_accuracy() -> None:
++    """Verify that hits and misses increment monotonically with each operation."""
++    cache = ResultCache()
++
++    for idx in range(3):
++        await cache.get(f"missing_{idx}")
++
++    await cache.put("present_key", {"value": 42})
++
++    for _ in range(5):
++        await cache.get("present_key")
++
++    stats = await cache.stats()
++    assert stats["entries"] == 1
++    assert stats["misses"] == 3
++    assert stats["hits"] == 5
++
++
++@pytest.mark.asyncio
++async def test_result_cache_concurrent_operations() -> None:
++    """Verify thread-safe concurrent reads and writes on the ResultCache."""
++    cache = ResultCache()
++
++    async def writer_task(key: str, val: int) -> None:
++        for offset in range(5):
++            await cache.put(f"{key}_{offset}", {"data": val + offset})
++
++    async def reader_task(key: str) -> None:
++        for offset in range(5):
++            await cache.get(f"{key}_{offset}")
++
++    tasks = [
++        writer_task("part_a", 10),
++        writer_task("part_b", 20),
++        reader_task("part_a"),
++        reader_task("part_b"),
++    ]
++    await asyncio.gather(*tasks)
++
++    live_keys = await cache.keys()
++    assert len(live_keys) == 10
++
++
++@pytest.mark.asyncio
++async def test_multi_step_workflow_partial_memoization() -> None:
++    """Verify pipeline execution where some steps are memoized and others are not."""
++    worker = DedicatedWorker()
++    factory = ExecutorFactory()
++    factory.register("custom", worker)
++    worker_pool = WorkerPool(factory=factory)
++    runner = WorkflowRunner(worker_pool=worker_pool, hook_registry=HookRegistry())
++
++    dag_spec = DAGSpec(
++        id="mixed_dag",
++        steps=[
++            StepSpec(
++                id="cached_step",
++                executor_type=ExecutorType.CUSTOM,
++                memoization=MemoizationPolicySpec(enabled=True, key="fixed_cache"),
++            ),
++            StepSpec(
++                id="fresh_step",
++                executor_type=ExecutorType.CUSTOM,
++                memoization=MemoizationPolicySpec(enabled=False),
++            ),
++        ],
++    )
++
++    await runner.run_async(dag_spec)
++    assert worker.invocation_count == 2
++
++    await runner.run_async(dag_spec)
++    # cached_step reuses output (0 calls), fresh_step runs again (1 call)
++    assert worker.invocation_count == 3
++
++
++@pytest.mark.asyncio
++async def test_memoization_cache_hit_preserves_step_state() -> None:
++    """Verify that a cache hit populates normal step output and completed state."""
++    worker = DedicatedWorker()
++    factory = ExecutorFactory()
++    factory.register("custom", worker)
++    worker_pool = WorkerPool(factory=factory)
++    runner = WorkflowRunner(worker_pool=worker_pool, hook_registry=HookRegistry())
++
++    dag_spec = DAGSpec(
++        id="state_dag",
++        steps=[
++            StepSpec(
++                id="compute",
++                executor_type=ExecutorType.CUSTOM,
++                memoization=MemoizationPolicySpec(enabled=True, key="state_key"),
++            )
++        ],
++    )
++
++    first_result = await runner.run_async(dag_spec)
++    second_result = await runner.run_async(dag_spec)
++
++    assert second_result.outputs["compute"] == first_result.outputs["compute"]
++    assert second_result.step_states["compute"].name in ("COMPLETED", "SUCCESS")
