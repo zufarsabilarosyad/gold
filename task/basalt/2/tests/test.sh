@@ -45,10 +45,10 @@ export PYTHONSAFEPATH=1
 git checkout -q 69686949e6162606cc54293dc2af217d63161577 -- tests/conftest.py pyproject.toml 2>/dev/null || true
 
 set +e
-PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto -o pythonpath=src --junitxml=/logs/verifier/base.xml" run_log python3 -I -m pytest -q \
+PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/base.xml" run_log python3 -P -c 'import sys, pytest; sys.path.insert(0, "/app/src"); raise SystemExit(pytest.main())' -q \
   tests/test_engine.py tests/test_dag_sorter.py tests/test_executors.py \
   tests/test_resilience.py tests/test_state_machine.py
-PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto -o pythonpath=src --junitxml=/logs/verifier/new.xml" run_log python3 -I -m pytest -q \
+PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/new.xml" run_log python3 -P -c 'import sys, pytest; sys.path.insert(0, "/app/src"); raise SystemExit(pytest.main())' -q \
   tests/test_result_memoization.py tests/test_result_memoization_contract_notes.py
 set -e
 # >>> END RUN TESTS <<<

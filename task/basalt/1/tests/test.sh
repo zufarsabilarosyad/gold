@@ -20,20 +20,20 @@ run_log() { echo "+ $*" >> "$RUN_LOG" 2>/dev/null; "$@" 2>&1 | tee -a "$RUN_LOG"
 
 # >>> RUN TESTS (task-specific) <<<
 # Keep checkout-controlled startup files out of the test processes and final
-# Python grader. Pytest adds src only after Python has started.
+# Python grader. The small launcher adds src only after Python startup.
 unset PYTHONPATH
 export PYTHONSAFEPATH=1
 
 set +e
 # Existing Basalt regression suite (pass-to-pass coverage).
-PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto -o pythonpath=src --junitxml=/logs/verifier/base.xml" run_log python3 -I -m pytest -q \
+PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/base.xml" run_log python3 -P -c 'import sys, pytest; sys.path.insert(0, "/app/src"); raise SystemExit(pytest.main())' -q \
   tests/test_api_routes.py tests/test_cli_commands.py tests/test_context_evaluator.py \
   tests/test_dag_parser.py tests/test_dag_sorter.py tests/test_engine.py \
   tests/test_engine_integration.py tests/test_executors.py tests/test_resilience.py \
   tests/test_state_machine.py tests/test_storage_repository.py tests/test_triggers.py \
   tests/test_worker_pool.py
 # New workflow retry and failure-policy behavior (fail-to-pass coverage).
-PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto -o pythonpath=src --junitxml=/logs/verifier/new.xml" run_log python3 -I -m pytest -q \
+PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/new.xml" run_log python3 -P -c 'import sys, pytest; sys.path.insert(0, "/app/src"); raise SystemExit(pytest.main())' -q \
   tests/test_retry_policies.py tests/test_failure_continuation.py
 set -e
 # >>> END RUN TESTS <<<
