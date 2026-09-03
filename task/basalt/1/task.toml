@@ -2,7 +2,8 @@ schema_version = "1.1"
 artifacts = ["/logs/artifacts/model.patch"]
 
 [task]
-name = "zufarsabilarosyad/workflow-retry-policies"
+name = "afterquery/workflow-retry-policies"
+
 
 [metadata]
 task_id = "workflow-retry-policies"
