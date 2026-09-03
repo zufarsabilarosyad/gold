@@ -5,7 +5,10 @@ from datetime import UTC, datetime
 
 import pytest
 
-from basalt.api.router_runs import _to_run_status_response
+import httpx
+from httpx import ASGITransport
+
+from basalt.api.app import create_app
 from basalt.core.dag.ast import (
     DAGSpec,
     ExecutorType,
@@ -14,7 +17,7 @@ from basalt.core.dag.ast import (
     StepSpec,
 )
 from basalt.core.engine.context import ExecutionContext
-from basalt.core.engine.engine import BasaltEngine, EngineConfig
+from basalt.core.engine.engine import BasaltEngine, EngineConfig, set_engine
 from basalt.core.engine.hooks import HookRegistry, LifecycleEvent
 from basalt.core.engine.runner import WorkflowRunner
 from basalt.core.engine.state_machine import StepState, WorkflowState
@@ -102,6 +105,30 @@ async def test_retry_hook_receives_each_recoverable_failure():
     assert result.is_success()
     assert [event["attempt"] for event in events] == [1, 2]
     assert all(event["delay_seconds"] == 0.001 for event in events)
+    assert all("error" in event and "temporary" in str(event["error"]) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_step_failure_hook_payload_on_terminal_exhaustion():
+    calls: list[int] = []
+    failure_payloads: list[dict] = []
+    retry_step("exhaust_hook_step", 5, calls)
+    hooks = HookRegistry()
+
+    async def record_failure(_, __, payload):
+        failure_payloads.append(payload)
+
+    hooks.register(LifecycleEvent.STEP_FAILURE, record_failure)
+    result = await WorkflowRunner(hook_registry=hooks).run_async(
+        DAGSpec(id="exhaust_dag", steps=[retry_spec("exhaust_hook_step", max_retries=2)])
+    )
+    assert result.state == WorkflowState.FAILED
+    assert len(failure_payloads) == 1
+    fail_ev = failure_payloads[0]
+    assert fail_ev["step_id"] == "work"
+    assert fail_ev["attempt"] == 3
+    assert "error" in fail_ev and "temporary" in str(fail_ev["error"])
+
 
 
 @pytest.mark.asyncio
@@ -310,9 +337,18 @@ async def test_retry_step_persistence_in_sqlite(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_retry_attempt_surfaced_in_api_responses():
+async def test_retry_attempt_surfaced_in_api_responses(tmp_path):
     calls: list[int] = []
     retry_step("api_step_fn", 1, calls)
+
+    db_file = tmp_path / "api_retry_test.db"
+    db_url = f"sqlite+aiosqlite:///{db_file}"
+
+    engine = BasaltEngine(config=EngineConfig(db_url=db_url, use_memory_storage=False, enable_triggers=False))
+    set_engine(engine)
+    await engine.start()
+
+    app = create_app()
 
     dag = DAGSpec(
         id="api_dag",
@@ -327,14 +363,28 @@ async def test_retry_attempt_surfaced_in_api_responses():
         ],
     )
 
-    result = await WorkflowRunner().run_async(dag)
-    status_resp = _to_run_status_response(result)
+    await engine.register_dag(dag)
+    result = await engine.run_dag("api_dag")
 
-    assert status_resp.state == WorkflowState.COMPLETED
-    step_runs = {sr.step_id: sr for sr in status_resp.step_runs}
-    assert "step_api" in step_runs
-    assert step_runs["step_api"].attempt == 2
-    assert step_runs["step_api"].state == StepState.COMPLETED
+    async with httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+        resp = await client.get(f"/api/v1/runs/{result.run_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["state"] == "COMPLETED"
+        step_runs = {sr["step_id"]: sr for sr in data["step_runs"]}
+        assert "step_api" in step_runs
+        assert step_runs["step_api"]["attempt"] == 2
+        assert step_runs["step_api"]["state"] == "COMPLETED"
+
+        resp_step = await client.get(f"/api/v1/runs/{result.run_id}/steps/step_api")
+        assert resp_step.status_code == 200
+        step_data = resp_step.json()
+        assert step_data["attempt"] == 2
+
+    await engine.stop()
+    set_engine(None)
+
+
 
 
 @pytest.mark.asyncio
@@ -371,3 +421,49 @@ async def test_retry_recovery_enables_dependent_downstream_step():
     assert result.step_attempts["parent"] == 2
     assert result.step_attempts["child"] == 1
     assert result.outputs["child"]["multiplied"] == 20
+
+
+def test_cli_attempt_count_rendering(tmp_path):
+    import json
+    from click.testing import CliRunner
+    from basalt.cli.main import cli
+
+    db_file = tmp_path / "cli_retry_test.db"
+    db_url = f"sqlite+aiosqlite:///{db_file}"
+
+    calls: list[int] = []
+    retry_step("cli_step_fn", 2, calls)
+
+    dag_file = tmp_path / "cli_retry_dag.yaml"
+    dag_file.write_text("""
+id: cli_retry_dag
+steps:
+  - id: retry_cli_step
+    executor_type: python_inline
+    callable_name: cli_step_fn
+    on_failure: retry
+    retry_policy:
+      max_retries: 3
+      initial_delay_seconds: 0.001
+""")
+
+    runner = CliRunner()
+    res_start = runner.invoke(
+        cli, ["run", "start", str(dag_file), "--run-id", "cli_test_run", "--db-url", db_url]
+    )
+    assert res_start.exit_code == 0
+
+    # 1. Verify status table renders 'Attempts' column and attempt count '3'
+    res_status = runner.invoke(cli, ["run", "status", "cli_test_run", "--db-url", db_url])
+    assert res_status.exit_code == 0
+    assert "Attempts" in res_status.output
+    assert "3" in res_status.output
+
+    # 2. Verify step detail returns attempt '3'
+    res_step = runner.invoke(
+        cli, ["run", "step", "cli_test_run", "retry_cli_step", "--db-url", db_url]
+    )
+    assert res_step.exit_code == 0
+    step_details = json.loads(res_step.output)
+    assert step_details["attempt"] == 3
+

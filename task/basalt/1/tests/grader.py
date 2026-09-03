@@ -132,15 +132,26 @@ def cmd_prepare(argv):
     base = load_config()["base_commit"]
     model_patch = ARTIFACTS_DIR / "model.patch"
     if model_patch.exists() and model_patch.stat().st_size > 0:
+        # Anti-cheat: model.patch must not touch tests/ or conftest.py
+        for p in patch_paths(read_patch(model_patch)):
+            if p.startswith("tests/") or p == "tests" or "conftest" in p:
+                log(f"ERROR: submitted model.patch touches forbidden test path: {p}")
+                cmd_grade(["--apply-failed"])
+                sys.exit(0)
         reset_paths(patch_paths(read_patch(model_patch)), base)
         rc = git("apply", "--whitespace=nowarn", str(model_patch)).returncode
         if rc != 0:
             log("ERROR: submitted model.patch failed to apply")
             cmd_grade(["--apply-failed"])
             sys.exit(0)
+        git("checkout", "-q", base, "--", "tests/conftest.py")
         log(f"model.patch applied ({model_patch.stat().st_size} bytes)")
     else:
         log("no model.patch submitted — grading pristine base state")
+
+    # Ensure tests/conftest.py is strictly at base commit
+    git("checkout", "-q", base, "--", "tests/conftest.py")
+
 
     test_patch = TESTS_DIR / "test.patch"
     log("Resetting files touched by test.patch")
