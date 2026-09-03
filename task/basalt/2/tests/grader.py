@@ -132,10 +132,14 @@ def cmd_prepare(argv):
     base = load_config()["base_commit"]
     model_patch = ARTIFACTS_DIR / "model.patch"
     if model_patch.exists() and model_patch.stat().st_size > 0:
-        # Anti-cheat: model.patch must not touch tests/, conftest.py, or sitecustomize
+        # Anti-cheat: candidate patch must strictly reside within src/basalt/
         for p in patch_paths(read_patch(model_patch)):
-            if p.startswith("tests/") or p == "tests" or "conftest" in p or "customize" in p:
-                log(f"ERROR: submitted model.patch touches forbidden test/system path: {p}")
+            if not p.startswith("src/basalt/"):
+                log(f"ERROR: submitted model.patch touches forbidden out-of-scope path: {p}")
+                cmd_grade(["--apply-failed"])
+                sys.exit(0)
+            if "customize" in p or "conftest" in p:
+                log(f"ERROR: submitted model.patch touches forbidden system hook path: {p}")
                 cmd_grade(["--apply-failed"])
                 sys.exit(0)
         reset_paths(patch_paths(read_patch(model_patch)), base)
@@ -144,13 +148,13 @@ def cmd_prepare(argv):
             log("ERROR: submitted model.patch failed to apply")
             cmd_grade(["--apply-failed"])
             sys.exit(0)
-        git("checkout", "-q", base, "--", "tests/conftest.py")
+        git("checkout", "-q", base, "--", "tests/conftest.py", "pyproject.toml")
         log(f"model.patch applied ({model_patch.stat().st_size} bytes)")
     else:
         log("no model.patch submitted — grading pristine base state")
 
-    # Ensure tests/conftest.py is strictly at base commit
-    git("checkout", "-q", base, "--", "tests/conftest.py")
+    # Ensure tests/conftest.py and pyproject.toml are strictly pristine at base commit
+    git("checkout", "-q", base, "--", "tests/conftest.py", "pyproject.toml")
 
 
     test_patch = TESTS_DIR / "test.patch"

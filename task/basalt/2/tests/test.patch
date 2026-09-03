@@ -1,13 +1,12 @@
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..532047a
+index 0000000..d25d70d
 --- /dev/null
 +++ b/tests/test_result_memoization.py
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,262 @@
 +"""Contract coverage for reusable workflow step results."""
 +
 +import asyncio
-+
 +import pytest
 +
 +from basalt.core.dag.ast import DAGSpec, ExecutorType, MemoizationPolicySpec, StepSpec
@@ -36,8 +35,11 @@ index 0000000..532047a
 +
 +
 +def dag(policy=None, depends=False, key="shared"):
-+    first = StepSpec(id="work", executor_type=ExecutorType.CUSTOM,
-+        memoization=policy or MemoizationPolicySpec(enabled=True, key=key))
++    first = StepSpec(
++        id="work",
++        executor_type=ExecutorType.CUSTOM,
++        memoization=policy or MemoizationPolicySpec(enabled=True, key=key),
++    )
 +    steps = [first]
 +    if depends:
 +        steps.append(StepSpec(id="after", executor_type=ExecutorType.CUSTOM, depends_on=["work"]))
@@ -45,126 +47,234 @@ index 0000000..532047a
 +
 +
 +def test_memo_policy_defaults_disabled():
-+    assert MemoizationPolicySpec().enabled is False
++    policy = MemoizationPolicySpec()
++    assert policy.enabled is False
++    assert policy.key is None
++    assert policy.ttl_seconds is None
++    assert policy.include_inputs is True
++
 +
 +def test_memo_policy_rejects_nonpositive_ttl():
 +    with pytest.raises(ValueError):
 +        MemoizationPolicySpec(enabled=True, ttl_seconds=0)
++    with pytest.raises(ValueError):
++        MemoizationPolicySpec(enabled=True, ttl_seconds=-1.0)
++
 +
 +@pytest.mark.asyncio
 +async def test_executable_definition_changes_cache_identity():
-+    r, count = runner()
-+    first = dag(); second = dag()
-+    first.steps[0].parameters = {"version": 1}
-+    second.steps[0].parameters = {"version": 2}
-+    await r.run_async(first); await r.run_async(second)
-+    assert count.calls == 2
++    runner_instance, counter = runner()
++    first_dag = dag()
++    second_dag = dag()
++    first_dag.steps[0].parameters = {"version": 1}
++    second_dag.steps[0].parameters = {"version": 2}
++    await runner_instance.run_async(first_dag)
++    await runner_instance.run_async(second_dag)
++    assert counter.calls == 2
++
 +
 +@pytest.mark.asyncio
 +async def test_dependency_output_changes_cache_identity():
-+    r, count = runner()
++    runner_instance, counter = runner()
 +    child_policy = MemoizationPolicySpec(enabled=True, key="child", include_inputs=False)
-+    graph = DAGSpec(id="deps", steps=[
-+        StepSpec(id="parent", executor_type=ExecutorType.CUSTOM),
-+        StepSpec(id="child", executor_type=ExecutorType.CUSTOM,
-+                 depends_on=["parent"], memoization=child_policy),
-+    ])
-+    await r.run_async(graph, {"value": 1}); await r.run_async(graph, {"value": 2})
-+    assert count.calls == 4
++    graph = DAGSpec(
++        id="deps",
++        steps=[
++            StepSpec(id="parent", executor_type=ExecutorType.CUSTOM),
++            StepSpec(
++                id="child",
++                executor_type=ExecutorType.CUSTOM,
++                depends_on=["parent"],
++                memoization=child_policy,
++            ),
++        ],
++    )
++    await runner_instance.run_async(graph, {"value": 1})
++    await runner_instance.run_async(graph, {"value": 2})
++    assert counter.calls == 4
++
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_put_and_get():
-+    cache = ResultCache(); await cache.put("a", {"x": 1}); assert await cache.get("a") == {"x": 1}
++    cache = ResultCache()
++    await cache.put("a", {"x": 1})
++    assert await cache.get("a") == {"x": 1}
++
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_returns_copies():
-+    cache = ResultCache(); data = {"x": []}; await cache.put("a", data); data["x"].append(2); assert await cache.get("a") == {"x": []}; out = await cache.get("a"); out["x"].append(1); assert await cache.get("a") == {"x": []}
++    cache = ResultCache()
++    original_input = {"x": []}
++    await cache.put("a", original_input)
++    original_input["x"].append(2)
++    assert await cache.get("a") == {"x": []}
++    retrieved = await cache.get("a")
++    retrieved["x"].append(1)
++    assert await cache.get("a") == {"x": []}
++
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_invalidates_entry():
-+    cache = ResultCache(); await cache.put("a", {}); assert await cache.invalidate("a"); assert await cache.get("a") is None
++    cache = ResultCache()
++    await cache.put("a", {"status": "ok"})
++    assert await cache.invalidate("a") is True
++    assert await cache.get("a") is None
++
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_clear_reports_count():
-+    cache = ResultCache(); await cache.put("a", {}); await cache.put("b", {}); assert await cache.clear() == 2
++    cache = ResultCache()
++    await cache.put("a", {})
++    await cache.put("b", {})
++    assert await cache.clear() == 2
++    assert await cache.get("a") is None
++    assert await cache.get("b") is None
++
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_expires_entries():
-+    cache = ResultCache(); await cache.put("a", {}, 0.001); await asyncio.sleep(0.01); assert await cache.get("a") is None
++    cache = ResultCache()
++    await cache.put("a", {"data": 1}, ttl_seconds=0.001)
++    await asyncio.sleep(0.01)
++    assert await cache.get("a") is None
++
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_stats_track_hits_and_misses():
-+    cache = ResultCache(); await cache.get("missing"); await cache.put("a", {}); await cache.get("a")
++    cache = ResultCache()
++    await cache.get("missing")
++    await cache.put("a", {})
++    await cache.get("a")
 +    assert await cache.stats() == {"entries": 1, "hits": 1, "misses": 1}
++
 +
 +@pytest.mark.asyncio
 +async def test_enabled_step_reuses_result_across_runs():
-+    r, count = runner(); await r.run_async(dag(), {"value": 1}); second = await r.run_async(dag(), {"value": 1}); assert count.calls == 1 and second.outputs["work"]["call"] == 1
++    runner_instance, counter = runner()
++    d = dag()
++    await runner_instance.run_async(d, {"value": 1})
++    second_run = await runner_instance.run_async(d, {"value": 1})
++    assert counter.calls == 1
++    assert second_run.outputs["work"]["call"] == 1
++
 +
 +@pytest.mark.asyncio
 +async def test_disabled_step_always_executes():
-+    r, count = runner(); d = dag(MemoizationPolicySpec(enabled=False)); await r.run_async(d); await r.run_async(d); assert count.calls == 2
++    runner_instance, counter = runner()
++    d = dag(MemoizationPolicySpec(enabled=False))
++    await runner_instance.run_async(d)
++    await runner_instance.run_async(d)
++    assert counter.calls == 2
++
 +
 +@pytest.mark.asyncio
 +async def test_changed_inputs_miss_cache():
-+    r, count = runner(); await r.run_async(dag(), {"value": 1}); await r.run_async(dag(), {"value": 2}); assert count.calls == 2
++    runner_instance, counter = runner()
++    d = dag()
++    await runner_instance.run_async(d, {"value": 1})
++    await runner_instance.run_async(d, {"value": 2})
++    assert counter.calls == 2
++
 +
 +@pytest.mark.asyncio
 +async def test_include_inputs_false_reuses_across_inputs():
-+    r, count = runner(); d = dag(MemoizationPolicySpec(enabled=True, key="x", include_inputs=False)); await r.run_async(d, {"value": 1}); await r.run_async(d, {"value": 2}); assert count.calls == 1
++    runner_instance, counter = runner()
++    d = dag(MemoizationPolicySpec(enabled=True, key="x", include_inputs=False))
++    await runner_instance.run_async(d, {"value": 1})
++    await runner_instance.run_async(d, {"value": 2})
++    assert counter.calls == 1
++
 +
 +@pytest.mark.asyncio
 +async def test_changed_key_is_a_different_cache_namespace():
-+    r, count = runner(); await r.run_async(dag(key="one")); await r.run_async(dag(key="two")); assert count.calls == 2
++    runner_instance, counter = runner()
++    await runner_instance.run_async(dag(key="one"))
++    await runner_instance.run_async(dag(key="two"))
++    assert counter.calls == 2
++
 +
 +@pytest.mark.asyncio
 +async def test_ttl_expiry_executes_again():
-+    r, count = runner(); d = dag(MemoizationPolicySpec(enabled=True, key="ttl", ttl_seconds=.001)); await r.run_async(d); await asyncio.sleep(.01); await r.run_async(d); assert count.calls == 2
++    runner_instance, counter = runner()
++    d = dag(MemoizationPolicySpec(enabled=True, key="ttl", ttl_seconds=0.001))
++    await runner_instance.run_async(d)
++    await asyncio.sleep(0.01)
++    await runner_instance.run_async(d)
++    assert counter.calls == 2
++
 +
 +@pytest.mark.asyncio
 +async def test_cache_hit_emits_lifecycle_event():
-+    seen=[]; hooks=HookRegistry()
-+    hooks.register(LifecycleEvent.STEP_CACHE_HIT, lambda e,c,p: seen.append((e,p)))
-+    r,_ = runner(hooks=hooks); await r.run_async(dag()); await r.run_async(dag())
++    seen = []
++    hooks = HookRegistry()
++    hooks.register(LifecycleEvent.STEP_CACHE_HIT, lambda e, c, p: seen.append((e, p)))
++    runner_instance, _ = runner(hooks=hooks)
++    await runner_instance.run_async(dag())
++    await runner_instance.run_async(dag())
++    assert len(seen) >= 1
 +    event, payload = seen[0]
 +    assert event == LifecycleEvent.STEP_CACHE_HIT
-+    assert set(payload) == {"step_id", "cache_key", "output"}
-+    assert payload["step_id"] == "work" and isinstance(payload["cache_key"], str) and len(payload["cache_key"]) > 0
++    assert set(payload.keys()) == {"step_id", "cache_key", "output"}
++    assert payload["step_id"] == "work"
++    assert isinstance(payload["cache_key"], str) and len(payload["cache_key"]) > 0
++
 +
 +@pytest.mark.asyncio
 +async def test_cache_hit_success_payload_marks_cached():
-+    seen=[]; hooks=HookRegistry()
++    seen = []
++    hooks = HookRegistry()
 +    for event in (LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS):
-+        hooks.register(event, lambda e,c,p: seen.append((e,p)))
-+    r,_ = runner(hooks=hooks); await r.run_async(dag())
++        hooks.register(event, lambda e, c, p: seen.append((e, p)))
++    runner_instance, _ = runner(hooks=hooks)
++    await runner_instance.run_async(dag())
 +    assert seen[-1][1]["cached"] is False
-+    seen.clear(); await r.run_async(dag())
-+    assert [event for event, _ in seen] == [LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS]
++    seen.clear()
++    await runner_instance.run_async(dag())
++    events = [event for event, _ in seen]
++    assert events == [LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS]
 +    assert seen[-1][1] == {"step_id": "work", "output": {"call": 1, "input": None}, "cached": True}
++
 +
 +@pytest.mark.asyncio
 +async def test_cached_parent_allows_dependent_step():
-+    r, count = runner(); d=dag(depends=True); await r.run_async(d); out=await r.run_async(d); assert out.outputs["after"] and count.calls == 3
++    runner_instance, counter = runner()
++    d = dag(depends=True)
++    await runner_instance.run_async(d)
++    out = await runner_instance.run_async(d)
++    assert out.outputs["after"] is not None
++    assert counter.calls == 3
++
 +
 +@pytest.mark.asyncio
 +async def test_cache_can_be_shared_between_runners():
-+    cache=ResultCache(); one,counter=runner(cache=cache); two,_=runner(counter=counter, cache=cache); await one.run_async(dag()); await two.run_async(dag()); assert counter.calls == 1
++    cache = ResultCache()
++    first_runner, counter = runner(cache=cache)
++    second_runner, _ = runner(counter=counter, cache=cache)
++    await first_runner.run_async(dag())
++    await second_runner.run_async(dag())
++    assert counter.calls == 1
++
 +
 +@pytest.mark.asyncio
 +async def test_failed_work_is_not_cached():
-+    class Bad(Counter):
++    class FailingExecutor(Counter):
 +        async def execute(self, step, context):
 +            self.calls += 1
-+            raise RuntimeError("no")
-+    r, count=runner(Bad()); await r.run_async(dag()); await r.run_async(dag()); assert count.calls == 2
++            raise RuntimeError("Step failed intentionally")
++
++    runner_instance, counter = runner(FailingExecutor())
++    await runner_instance.run_async(dag())
++    await runner_instance.run_async(dag())
++    assert counter.calls == 2
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..22d7922
+index 0000000..3345105
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,502 @@
+@@ -0,0 +1,32 @@
 +"""Additional contract coverage for the public ResultCache surface."""
 +
++import asyncio
 +import pytest
 +
 +from basalt.core.engine.memoization import ResultCache
@@ -175,493 +285,22 @@ index 0000000..22d7922
 +    cache = ResultCache()
 +    await cache.put("one", {"result": 1})
 +    await cache.put("two", {"result": 2}, ttl_seconds=0.001)
-+    import asyncio
 +    await asyncio.sleep(0.01)
 +    assert await cache.keys() == ["one"]
 +
 +
 +@pytest.mark.asyncio
 +async def test_invalidate_missing_key_reports_false():
-+    assert await ResultCache().invalidate("missing") is False
++    cache = ResultCache()
++    assert await cache.invalidate("missing") is False
 +
 +
 +@pytest.mark.asyncio
 +async def test_clear_leaves_zero_entries():
 +    cache = ResultCache()
 +    await cache.put("one", {})
-+    await cache.clear()
++    await cache.put("two", {})
++    cleared = await cache.clear()
++    assert cleared == 2
 +    assert await cache.stats() == {"entries": 0, "hits": 0, "misses": 0}
-+
-+
-+CONTRACT_NOTES = [
-+    "edge-case contract note 1: serialized memoization values remain isolated.",
-+    "edge-case contract note 2: serialized memoization values remain isolated.",
-+    "edge-case contract note 3: serialized memoization values remain isolated.",
-+    "edge-case contract note 4: serialized memoization values remain isolated.",
-+    "edge-case contract note 5: serialized memoization values remain isolated.",
-+    "edge-case contract note 6: serialized memoization values remain isolated.",
-+    "edge-case contract note 7: serialized memoization values remain isolated.",
-+    "edge-case contract note 8: serialized memoization values remain isolated.",
-+    "edge-case contract note 9: serialized memoization values remain isolated.",
-+    "edge-case contract note 10: serialized memoization values remain isolated.",
-+    "edge-case contract note 11: serialized memoization values remain isolated.",
-+    "edge-case contract note 12: serialized memoization values remain isolated.",
-+    "edge-case contract note 13: serialized memoization values remain isolated.",
-+    "edge-case contract note 14: serialized memoization values remain isolated.",
-+    "edge-case contract note 15: serialized memoization values remain isolated.",
-+    "edge-case contract note 16: serialized memoization values remain isolated.",
-+    "edge-case contract note 17: serialized memoization values remain isolated.",
-+    "edge-case contract note 18: serialized memoization values remain isolated.",
-+    "edge-case contract note 19: serialized memoization values remain isolated.",
-+    "edge-case contract note 20: serialized memoization values remain isolated.",
-+    "edge-case contract note 21: serialized memoization values remain isolated.",
-+    "edge-case contract note 22: serialized memoization values remain isolated.",
-+    "edge-case contract note 23: serialized memoization values remain isolated.",
-+    "edge-case contract note 24: serialized memoization values remain isolated.",
-+    "edge-case contract note 25: serialized memoization values remain isolated.",
-+    "edge-case contract note 26: serialized memoization values remain isolated.",
-+    "edge-case contract note 27: serialized memoization values remain isolated.",
-+    "edge-case contract note 28: serialized memoization values remain isolated.",
-+    "edge-case contract note 29: serialized memoization values remain isolated.",
-+    "edge-case contract note 30: serialized memoization values remain isolated.",
-+    "edge-case contract note 31: serialized memoization values remain isolated.",
-+    "edge-case contract note 32: serialized memoization values remain isolated.",
-+    "edge-case contract note 33: serialized memoization values remain isolated.",
-+    "edge-case contract note 34: serialized memoization values remain isolated.",
-+    "edge-case contract note 35: serialized memoization values remain isolated.",
-+    "edge-case contract note 36: serialized memoization values remain isolated.",
-+    "edge-case contract note 37: serialized memoization values remain isolated.",
-+    "edge-case contract note 38: serialized memoization values remain isolated.",
-+    "edge-case contract note 39: serialized memoization values remain isolated.",
-+    "edge-case contract note 40: serialized memoization values remain isolated.",
-+    "edge-case contract note 41: serialized memoization values remain isolated.",
-+    "edge-case contract note 42: serialized memoization values remain isolated.",
-+    "edge-case contract note 43: serialized memoization values remain isolated.",
-+    "edge-case contract note 44: serialized memoization values remain isolated.",
-+    "edge-case contract note 45: serialized memoization values remain isolated.",
-+    "edge-case contract note 46: serialized memoization values remain isolated.",
-+    "edge-case contract note 47: serialized memoization values remain isolated.",
-+    "edge-case contract note 48: serialized memoization values remain isolated.",
-+    "edge-case contract note 49: serialized memoization values remain isolated.",
-+    "edge-case contract note 50: serialized memoization values remain isolated.",
-+    "edge-case contract note 51: serialized memoization values remain isolated.",
-+    "edge-case contract note 52: serialized memoization values remain isolated.",
-+    "edge-case contract note 53: serialized memoization values remain isolated.",
-+    "edge-case contract note 54: serialized memoization values remain isolated.",
-+    "edge-case contract note 55: serialized memoization values remain isolated.",
-+    "edge-case contract note 56: serialized memoization values remain isolated.",
-+    "edge-case contract note 57: serialized memoization values remain isolated.",
-+    "edge-case contract note 58: serialized memoization values remain isolated.",
-+    "edge-case contract note 59: serialized memoization values remain isolated.",
-+    "edge-case contract note 60: serialized memoization values remain isolated.",
-+    "edge-case contract note 61: serialized memoization values remain isolated.",
-+    "edge-case contract note 62: serialized memoization values remain isolated.",
-+    "edge-case contract note 63: serialized memoization values remain isolated.",
-+    "edge-case contract note 64: serialized memoization values remain isolated.",
-+    "edge-case contract note 65: serialized memoization values remain isolated.",
-+    "edge-case contract note 66: serialized memoization values remain isolated.",
-+    "edge-case contract note 67: serialized memoization values remain isolated.",
-+    "edge-case contract note 68: serialized memoization values remain isolated.",
-+    "edge-case contract note 69: serialized memoization values remain isolated.",
-+    "edge-case contract note 70: serialized memoization values remain isolated.",
-+    "edge-case contract note 71: serialized memoization values remain isolated.",
-+    "edge-case contract note 72: serialized memoization values remain isolated.",
-+    "edge-case contract note 73: serialized memoization values remain isolated.",
-+    "edge-case contract note 74: serialized memoization values remain isolated.",
-+    "edge-case contract note 75: serialized memoization values remain isolated.",
-+    "edge-case contract note 76: serialized memoization values remain isolated.",
-+    "edge-case contract note 77: serialized memoization values remain isolated.",
-+    "edge-case contract note 78: serialized memoization values remain isolated.",
-+    "edge-case contract note 79: serialized memoization values remain isolated.",
-+    "edge-case contract note 80: serialized memoization values remain isolated.",
-+    "edge-case contract note 81: serialized memoization values remain isolated.",
-+    "edge-case contract note 82: serialized memoization values remain isolated.",
-+    "edge-case contract note 83: serialized memoization values remain isolated.",
-+    "edge-case contract note 84: serialized memoization values remain isolated.",
-+    "edge-case contract note 85: serialized memoization values remain isolated.",
-+    "edge-case contract note 86: serialized memoization values remain isolated.",
-+    "edge-case contract note 87: serialized memoization values remain isolated.",
-+    "edge-case contract note 88: serialized memoization values remain isolated.",
-+    "edge-case contract note 89: serialized memoization values remain isolated.",
-+    "edge-case contract note 90: serialized memoization values remain isolated.",
-+    "edge-case contract note 91: serialized memoization values remain isolated.",
-+    "edge-case contract note 92: serialized memoization values remain isolated.",
-+    "edge-case contract note 93: serialized memoization values remain isolated.",
-+    "edge-case contract note 94: serialized memoization values remain isolated.",
-+    "edge-case contract note 95: serialized memoization values remain isolated.",
-+    "edge-case contract note 96: serialized memoization values remain isolated.",
-+    "edge-case contract note 97: serialized memoization values remain isolated.",
-+    "edge-case contract note 98: serialized memoization values remain isolated.",
-+    "edge-case contract note 99: serialized memoization values remain isolated.",
-+    "edge-case contract note 100: serialized memoization values remain isolated.",
-+    "edge-case contract note 101: serialized memoization values remain isolated.",
-+    "edge-case contract note 102: serialized memoization values remain isolated.",
-+    "edge-case contract note 103: serialized memoization values remain isolated.",
-+    "edge-case contract note 104: serialized memoization values remain isolated.",
-+    "edge-case contract note 105: serialized memoization values remain isolated.",
-+    "edge-case contract note 106: serialized memoization values remain isolated.",
-+    "edge-case contract note 107: serialized memoization values remain isolated.",
-+    "edge-case contract note 108: serialized memoization values remain isolated.",
-+    "edge-case contract note 109: serialized memoization values remain isolated.",
-+    "edge-case contract note 110: serialized memoization values remain isolated.",
-+    "edge-case contract note 111: serialized memoization values remain isolated.",
-+    "edge-case contract note 112: serialized memoization values remain isolated.",
-+    "edge-case contract note 113: serialized memoization values remain isolated.",
-+    "edge-case contract note 114: serialized memoization values remain isolated.",
-+    "edge-case contract note 115: serialized memoization values remain isolated.",
-+    "edge-case contract note 116: serialized memoization values remain isolated.",
-+    "edge-case contract note 117: serialized memoization values remain isolated.",
-+    "edge-case contract note 118: serialized memoization values remain isolated.",
-+    "edge-case contract note 119: serialized memoization values remain isolated.",
-+    "edge-case contract note 120: serialized memoization values remain isolated.",
-+    "edge-case contract note 121: serialized memoization values remain isolated.",
-+    "edge-case contract note 122: serialized memoization values remain isolated.",
-+    "edge-case contract note 123: serialized memoization values remain isolated.",
-+    "edge-case contract note 124: serialized memoization values remain isolated.",
-+    "edge-case contract note 125: serialized memoization values remain isolated.",
-+    "edge-case contract note 126: serialized memoization values remain isolated.",
-+    "edge-case contract note 127: serialized memoization values remain isolated.",
-+    "edge-case contract note 128: serialized memoization values remain isolated.",
-+    "edge-case contract note 129: serialized memoization values remain isolated.",
-+    "edge-case contract note 130: serialized memoization values remain isolated.",
-+    "edge-case contract note 131: serialized memoization values remain isolated.",
-+    "edge-case contract note 132: serialized memoization values remain isolated.",
-+    "edge-case contract note 133: serialized memoization values remain isolated.",
-+    "edge-case contract note 134: serialized memoization values remain isolated.",
-+    "edge-case contract note 135: serialized memoization values remain isolated.",
-+    "edge-case contract note 136: serialized memoization values remain isolated.",
-+    "edge-case contract note 137: serialized memoization values remain isolated.",
-+    "edge-case contract note 138: serialized memoization values remain isolated.",
-+    "edge-case contract note 139: serialized memoization values remain isolated.",
-+    "edge-case contract note 140: serialized memoization values remain isolated.",
-+    "edge-case contract note 141: serialized memoization values remain isolated.",
-+    "edge-case contract note 142: serialized memoization values remain isolated.",
-+    "edge-case contract note 143: serialized memoization values remain isolated.",
-+    "edge-case contract note 144: serialized memoization values remain isolated.",
-+    "edge-case contract note 145: serialized memoization values remain isolated.",
-+    "edge-case contract note 146: serialized memoization values remain isolated.",
-+    "edge-case contract note 147: serialized memoization values remain isolated.",
-+    "edge-case contract note 148: serialized memoization values remain isolated.",
-+    "edge-case contract note 149: serialized memoization values remain isolated.",
-+    "edge-case contract note 150: serialized memoization values remain isolated.",
-+    "edge-case contract note 151: serialized memoization values remain isolated.",
-+    "edge-case contract note 152: serialized memoization values remain isolated.",
-+    "edge-case contract note 153: serialized memoization values remain isolated.",
-+    "edge-case contract note 154: serialized memoization values remain isolated.",
-+    "edge-case contract note 155: serialized memoization values remain isolated.",
-+    "edge-case contract note 156: serialized memoization values remain isolated.",
-+    "edge-case contract note 157: serialized memoization values remain isolated.",
-+    "edge-case contract note 158: serialized memoization values remain isolated.",
-+    "edge-case contract note 159: serialized memoization values remain isolated.",
-+    "edge-case contract note 160: serialized memoization values remain isolated.",
-+    "edge-case contract note 161: serialized memoization values remain isolated.",
-+    "edge-case contract note 162: serialized memoization values remain isolated.",
-+    "edge-case contract note 163: serialized memoization values remain isolated.",
-+    "edge-case contract note 164: serialized memoization values remain isolated.",
-+    "edge-case contract note 165: serialized memoization values remain isolated.",
-+    "edge-case contract note 166: serialized memoization values remain isolated.",
-+    "edge-case contract note 167: serialized memoization values remain isolated.",
-+    "edge-case contract note 168: serialized memoization values remain isolated.",
-+    "edge-case contract note 169: serialized memoization values remain isolated.",
-+    "edge-case contract note 170: serialized memoization values remain isolated.",
-+    "edge-case contract note 171: serialized memoization values remain isolated.",
-+    "edge-case contract note 172: serialized memoization values remain isolated.",
-+    "edge-case contract note 173: serialized memoization values remain isolated.",
-+    "edge-case contract note 174: serialized memoization values remain isolated.",
-+    "edge-case contract note 175: serialized memoization values remain isolated.",
-+    "edge-case contract note 176: serialized memoization values remain isolated.",
-+    "edge-case contract note 177: serialized memoization values remain isolated.",
-+    "edge-case contract note 178: serialized memoization values remain isolated.",
-+    "edge-case contract note 179: serialized memoization values remain isolated.",
-+    "edge-case contract note 180: serialized memoization values remain isolated.",
-+    "edge-case contract note 181: serialized memoization values remain isolated.",
-+    "edge-case contract note 182: serialized memoization values remain isolated.",
-+    "edge-case contract note 183: serialized memoization values remain isolated.",
-+    "edge-case contract note 184: serialized memoization values remain isolated.",
-+    "edge-case contract note 185: serialized memoization values remain isolated.",
-+    "edge-case contract note 186: serialized memoization values remain isolated.",
-+    "edge-case contract note 187: serialized memoization values remain isolated.",
-+    "edge-case contract note 188: serialized memoization values remain isolated.",
-+    "edge-case contract note 189: serialized memoization values remain isolated.",
-+    "edge-case contract note 190: serialized memoization values remain isolated.",
-+    "edge-case contract note 191: serialized memoization values remain isolated.",
-+    "edge-case contract note 192: serialized memoization values remain isolated.",
-+    "edge-case contract note 193: serialized memoization values remain isolated.",
-+    "edge-case contract note 194: serialized memoization values remain isolated.",
-+    "edge-case contract note 195: serialized memoization values remain isolated.",
-+    "edge-case contract note 196: serialized memoization values remain isolated.",
-+    "edge-case contract note 197: serialized memoization values remain isolated.",
-+    "edge-case contract note 198: serialized memoization values remain isolated.",
-+    "edge-case contract note 199: serialized memoization values remain isolated.",
-+    "edge-case contract note 200: serialized memoization values remain isolated.",
-+    "edge-case contract note 201: serialized memoization values remain isolated.",
-+    "edge-case contract note 202: serialized memoization values remain isolated.",
-+    "edge-case contract note 203: serialized memoization values remain isolated.",
-+    "edge-case contract note 204: serialized memoization values remain isolated.",
-+    "edge-case contract note 205: serialized memoization values remain isolated.",
-+    "edge-case contract note 206: serialized memoization values remain isolated.",
-+    "edge-case contract note 207: serialized memoization values remain isolated.",
-+    "edge-case contract note 208: serialized memoization values remain isolated.",
-+    "edge-case contract note 209: serialized memoization values remain isolated.",
-+    "edge-case contract note 210: serialized memoization values remain isolated.",
-+    "edge-case contract note 211: serialized memoization values remain isolated.",
-+    "edge-case contract note 212: serialized memoization values remain isolated.",
-+    "edge-case contract note 213: serialized memoization values remain isolated.",
-+    "edge-case contract note 214: serialized memoization values remain isolated.",
-+    "edge-case contract note 215: serialized memoization values remain isolated.",
-+    "edge-case contract note 216: serialized memoization values remain isolated.",
-+    "edge-case contract note 217: serialized memoization values remain isolated.",
-+    "edge-case contract note 218: serialized memoization values remain isolated.",
-+    "edge-case contract note 219: serialized memoization values remain isolated.",
-+    "edge-case contract note 220: serialized memoization values remain isolated.",
-+    "edge-case contract note 221: serialized memoization values remain isolated.",
-+    "edge-case contract note 222: serialized memoization values remain isolated.",
-+    "edge-case contract note 223: serialized memoization values remain isolated.",
-+    "edge-case contract note 224: serialized memoization values remain isolated.",
-+    "edge-case contract note 225: serialized memoization values remain isolated.",
-+    "edge-case contract note 226: serialized memoization values remain isolated.",
-+    "edge-case contract note 227: serialized memoization values remain isolated.",
-+    "edge-case contract note 228: serialized memoization values remain isolated.",
-+    "edge-case contract note 229: serialized memoization values remain isolated.",
-+    "edge-case contract note 230: serialized memoization values remain isolated.",
-+    "edge-case contract note 231: serialized memoization values remain isolated.",
-+    "edge-case contract note 232: serialized memoization values remain isolated.",
-+    "edge-case contract note 233: serialized memoization values remain isolated.",
-+    "edge-case contract note 234: serialized memoization values remain isolated.",
-+    "edge-case contract note 235: serialized memoization values remain isolated.",
-+    "edge-case contract note 236: serialized memoization values remain isolated.",
-+    "edge-case contract note 237: serialized memoization values remain isolated.",
-+    "edge-case contract note 238: serialized memoization values remain isolated.",
-+    "edge-case contract note 239: serialized memoization values remain isolated.",
-+    "edge-case contract note 240: serialized memoization values remain isolated.",
-+    "edge-case contract note 241: serialized memoization values remain isolated.",
-+    "edge-case contract note 242: serialized memoization values remain isolated.",
-+    "edge-case contract note 243: serialized memoization values remain isolated.",
-+    "edge-case contract note 244: serialized memoization values remain isolated.",
-+    "edge-case contract note 245: serialized memoization values remain isolated.",
-+    "edge-case contract note 246: serialized memoization values remain isolated.",
-+    "edge-case contract note 247: serialized memoization values remain isolated.",
-+    "edge-case contract note 248: serialized memoization values remain isolated.",
-+    "edge-case contract note 249: serialized memoization values remain isolated.",
-+    "edge-case contract note 250: serialized memoization values remain isolated.",
-+    "edge-case contract note 251: serialized memoization values remain isolated.",
-+    "edge-case contract note 252: serialized memoization values remain isolated.",
-+    "edge-case contract note 253: serialized memoization values remain isolated.",
-+    "edge-case contract note 254: serialized memoization values remain isolated.",
-+    "edge-case contract note 255: serialized memoization values remain isolated.",
-+    "edge-case contract note 256: serialized memoization values remain isolated.",
-+    "edge-case contract note 257: serialized memoization values remain isolated.",
-+    "edge-case contract note 258: serialized memoization values remain isolated.",
-+    "edge-case contract note 259: serialized memoization values remain isolated.",
-+    "edge-case contract note 260: serialized memoization values remain isolated.",
-+    "edge-case contract note 261: serialized memoization values remain isolated.",
-+    "edge-case contract note 262: serialized memoization values remain isolated.",
-+    "edge-case contract note 263: serialized memoization values remain isolated.",
-+    "edge-case contract note 264: serialized memoization values remain isolated.",
-+    "edge-case contract note 265: serialized memoization values remain isolated.",
-+    "edge-case contract note 266: serialized memoization values remain isolated.",
-+    "edge-case contract note 267: serialized memoization values remain isolated.",
-+    "edge-case contract note 268: serialized memoization values remain isolated.",
-+    "edge-case contract note 269: serialized memoization values remain isolated.",
-+    "edge-case contract note 270: serialized memoization values remain isolated.",
-+    "edge-case contract note 271: serialized memoization values remain isolated.",
-+    "edge-case contract note 272: serialized memoization values remain isolated.",
-+    "edge-case contract note 273: serialized memoization values remain isolated.",
-+    "edge-case contract note 274: serialized memoization values remain isolated.",
-+    "edge-case contract note 275: serialized memoization values remain isolated.",
-+    "edge-case contract note 276: serialized memoization values remain isolated.",
-+    "edge-case contract note 277: serialized memoization values remain isolated.",
-+    "edge-case contract note 278: serialized memoization values remain isolated.",
-+    "edge-case contract note 279: serialized memoization values remain isolated.",
-+    "edge-case contract note 280: serialized memoization values remain isolated.",
-+    "edge-case contract note 281: serialized memoization values remain isolated.",
-+    "edge-case contract note 282: serialized memoization values remain isolated.",
-+    "edge-case contract note 283: serialized memoization values remain isolated.",
-+    "edge-case contract note 284: serialized memoization values remain isolated.",
-+    "edge-case contract note 285: serialized memoization values remain isolated.",
-+    "edge-case contract note 286: serialized memoization values remain isolated.",
-+    "edge-case contract note 287: serialized memoization values remain isolated.",
-+    "edge-case contract note 288: serialized memoization values remain isolated.",
-+    "edge-case contract note 289: serialized memoization values remain isolated.",
-+    "edge-case contract note 290: serialized memoization values remain isolated.",
-+    "edge-case contract note 291: serialized memoization values remain isolated.",
-+    "edge-case contract note 292: serialized memoization values remain isolated.",
-+    "edge-case contract note 293: serialized memoization values remain isolated.",
-+    "edge-case contract note 294: serialized memoization values remain isolated.",
-+    "edge-case contract note 295: serialized memoization values remain isolated.",
-+    "edge-case contract note 296: serialized memoization values remain isolated.",
-+    "edge-case contract note 297: serialized memoization values remain isolated.",
-+    "edge-case contract note 298: serialized memoization values remain isolated.",
-+    "edge-case contract note 299: serialized memoization values remain isolated.",
-+    "edge-case contract note 300: serialized memoization values remain isolated.",
-+    "edge-case contract note 301: serialized memoization values remain isolated.",
-+    "edge-case contract note 302: serialized memoization values remain isolated.",
-+    "edge-case contract note 303: serialized memoization values remain isolated.",
-+    "edge-case contract note 304: serialized memoization values remain isolated.",
-+    "edge-case contract note 305: serialized memoization values remain isolated.",
-+    "edge-case contract note 306: serialized memoization values remain isolated.",
-+    "edge-case contract note 307: serialized memoization values remain isolated.",
-+    "edge-case contract note 308: serialized memoization values remain isolated.",
-+    "edge-case contract note 309: serialized memoization values remain isolated.",
-+    "edge-case contract note 310: serialized memoization values remain isolated.",
-+    "edge-case contract note 311: serialized memoization values remain isolated.",
-+    "edge-case contract note 312: serialized memoization values remain isolated.",
-+    "edge-case contract note 313: serialized memoization values remain isolated.",
-+    "edge-case contract note 314: serialized memoization values remain isolated.",
-+    "edge-case contract note 315: serialized memoization values remain isolated.",
-+    "edge-case contract note 316: serialized memoization values remain isolated.",
-+    "edge-case contract note 317: serialized memoization values remain isolated.",
-+    "edge-case contract note 318: serialized memoization values remain isolated.",
-+    "edge-case contract note 319: serialized memoization values remain isolated.",
-+    "edge-case contract note 320: serialized memoization values remain isolated.",
-+    "edge-case contract note 321: serialized memoization values remain isolated.",
-+    "edge-case contract note 322: serialized memoization values remain isolated.",
-+    "edge-case contract note 323: serialized memoization values remain isolated.",
-+    "edge-case contract note 324: serialized memoization values remain isolated.",
-+    "edge-case contract note 325: serialized memoization values remain isolated.",
-+    "edge-case contract note 326: serialized memoization values remain isolated.",
-+    "edge-case contract note 327: serialized memoization values remain isolated.",
-+    "edge-case contract note 328: serialized memoization values remain isolated.",
-+    "edge-case contract note 329: serialized memoization values remain isolated.",
-+    "edge-case contract note 330: serialized memoization values remain isolated.",
-+    "edge-case contract note 331: serialized memoization values remain isolated.",
-+    "edge-case contract note 332: serialized memoization values remain isolated.",
-+    "edge-case contract note 333: serialized memoization values remain isolated.",
-+    "edge-case contract note 334: serialized memoization values remain isolated.",
-+    "edge-case contract note 335: serialized memoization values remain isolated.",
-+    "edge-case contract note 336: serialized memoization values remain isolated.",
-+    "edge-case contract note 337: serialized memoization values remain isolated.",
-+    "edge-case contract note 338: serialized memoization values remain isolated.",
-+    "edge-case contract note 339: serialized memoization values remain isolated.",
-+    "edge-case contract note 340: serialized memoization values remain isolated.",
-+    "edge-case contract note 341: serialized memoization values remain isolated.",
-+    "edge-case contract note 342: serialized memoization values remain isolated.",
-+    "edge-case contract note 343: serialized memoization values remain isolated.",
-+    "edge-case contract note 344: serialized memoization values remain isolated.",
-+    "edge-case contract note 345: serialized memoization values remain isolated.",
-+    "edge-case contract note 346: serialized memoization values remain isolated.",
-+    "edge-case contract note 347: serialized memoization values remain isolated.",
-+    "edge-case contract note 348: serialized memoization values remain isolated.",
-+    "edge-case contract note 349: serialized memoization values remain isolated.",
-+    "edge-case contract note 350: serialized memoization values remain isolated.",
-+    "edge-case contract note 351: serialized memoization values remain isolated.",
-+    "edge-case contract note 352: serialized memoization values remain isolated.",
-+    "edge-case contract note 353: serialized memoization values remain isolated.",
-+    "edge-case contract note 354: serialized memoization values remain isolated.",
-+    "edge-case contract note 355: serialized memoization values remain isolated.",
-+    "edge-case contract note 356: serialized memoization values remain isolated.",
-+    "edge-case contract note 357: serialized memoization values remain isolated.",
-+    "edge-case contract note 358: serialized memoization values remain isolated.",
-+    "edge-case contract note 359: serialized memoization values remain isolated.",
-+    "edge-case contract note 360: serialized memoization values remain isolated.",
-+    "edge-case contract note 361: serialized memoization values remain isolated.",
-+    "edge-case contract note 362: serialized memoization values remain isolated.",
-+    "edge-case contract note 363: serialized memoization values remain isolated.",
-+    "edge-case contract note 364: serialized memoization values remain isolated.",
-+    "edge-case contract note 365: serialized memoization values remain isolated.",
-+    "edge-case contract note 366: serialized memoization values remain isolated.",
-+    "edge-case contract note 367: serialized memoization values remain isolated.",
-+    "edge-case contract note 368: serialized memoization values remain isolated.",
-+    "edge-case contract note 369: serialized memoization values remain isolated.",
-+    "edge-case contract note 370: serialized memoization values remain isolated.",
-+    "edge-case contract note 371: serialized memoization values remain isolated.",
-+    "edge-case contract note 372: serialized memoization values remain isolated.",
-+    "edge-case contract note 373: serialized memoization values remain isolated.",
-+    "edge-case contract note 374: serialized memoization values remain isolated.",
-+    "edge-case contract note 375: serialized memoization values remain isolated.",
-+    "edge-case contract note 376: serialized memoization values remain isolated.",
-+    "edge-case contract note 377: serialized memoization values remain isolated.",
-+    "edge-case contract note 378: serialized memoization values remain isolated.",
-+    "edge-case contract note 379: serialized memoization values remain isolated.",
-+    "edge-case contract note 380: serialized memoization values remain isolated.",
-+    "edge-case contract note 381: serialized memoization values remain isolated.",
-+    "edge-case contract note 382: serialized memoization values remain isolated.",
-+    "edge-case contract note 383: serialized memoization values remain isolated.",
-+    "edge-case contract note 384: serialized memoization values remain isolated.",
-+    "edge-case contract note 385: serialized memoization values remain isolated.",
-+    "edge-case contract note 386: serialized memoization values remain isolated.",
-+    "edge-case contract note 387: serialized memoization values remain isolated.",
-+    "edge-case contract note 388: serialized memoization values remain isolated.",
-+    "edge-case contract note 389: serialized memoization values remain isolated.",
-+    "edge-case contract note 390: serialized memoization values remain isolated.",
-+    "edge-case contract note 391: serialized memoization values remain isolated.",
-+    "edge-case contract note 392: serialized memoization values remain isolated.",
-+    "edge-case contract note 393: serialized memoization values remain isolated.",
-+    "edge-case contract note 394: serialized memoization values remain isolated.",
-+    "edge-case contract note 395: serialized memoization values remain isolated.",
-+    "edge-case contract note 396: serialized memoization values remain isolated.",
-+    "edge-case contract note 397: serialized memoization values remain isolated.",
-+    "edge-case contract note 398: serialized memoization values remain isolated.",
-+    "edge-case contract note 399: serialized memoization values remain isolated.",
-+    "edge-case contract note 400: serialized memoization values remain isolated.",
-+    "edge-case contract note 401: serialized memoization values remain isolated.",
-+    "edge-case contract note 402: serialized memoization values remain isolated.",
-+    "edge-case contract note 403: serialized memoization values remain isolated.",
-+    "edge-case contract note 404: serialized memoization values remain isolated.",
-+    "edge-case contract note 405: serialized memoization values remain isolated.",
-+    "edge-case contract note 406: serialized memoization values remain isolated.",
-+    "edge-case contract note 407: serialized memoization values remain isolated.",
-+    "edge-case contract note 408: serialized memoization values remain isolated.",
-+    "edge-case contract note 409: serialized memoization values remain isolated.",
-+    "edge-case contract note 410: serialized memoization values remain isolated.",
-+    "edge-case contract note 411: serialized memoization values remain isolated.",
-+    "edge-case contract note 412: serialized memoization values remain isolated.",
-+    "edge-case contract note 413: serialized memoization values remain isolated.",
-+    "edge-case contract note 414: serialized memoization values remain isolated.",
-+    "edge-case contract note 415: serialized memoization values remain isolated.",
-+    "edge-case contract note 416: serialized memoization values remain isolated.",
-+    "edge-case contract note 417: serialized memoization values remain isolated.",
-+    "edge-case contract note 418: serialized memoization values remain isolated.",
-+    "edge-case contract note 419: serialized memoization values remain isolated.",
-+    "edge-case contract note 420: serialized memoization values remain isolated.",
-+    "edge-case contract note 421: serialized memoization values remain isolated.",
-+    "edge-case contract note 422: serialized memoization values remain isolated.",
-+    "edge-case contract note 423: serialized memoization values remain isolated.",
-+    "edge-case contract note 424: serialized memoization values remain isolated.",
-+    "edge-case contract note 425: serialized memoization values remain isolated.",
-+    "edge-case contract note 426: serialized memoization values remain isolated.",
-+    "edge-case contract note 427: serialized memoization values remain isolated.",
-+    "edge-case contract note 428: serialized memoization values remain isolated.",
-+    "edge-case contract note 429: serialized memoization values remain isolated.",
-+    "edge-case contract note 430: serialized memoization values remain isolated.",
-+    "edge-case contract note 431: serialized memoization values remain isolated.",
-+    "edge-case contract note 432: serialized memoization values remain isolated.",
-+    "edge-case contract note 433: serialized memoization values remain isolated.",
-+    "edge-case contract note 434: serialized memoization values remain isolated.",
-+    "edge-case contract note 435: serialized memoization values remain isolated.",
-+    "edge-case contract note 436: serialized memoization values remain isolated.",
-+    "edge-case contract note 437: serialized memoization values remain isolated.",
-+    "edge-case contract note 438: serialized memoization values remain isolated.",
-+    "edge-case contract note 439: serialized memoization values remain isolated.",
-+    "edge-case contract note 440: serialized memoization values remain isolated.",
-+    "edge-case contract note 441: serialized memoization values remain isolated.",
-+    "edge-case contract note 442: serialized memoization values remain isolated.",
-+    "edge-case contract note 443: serialized memoization values remain isolated.",
-+    "edge-case contract note 444: serialized memoization values remain isolated.",
-+    "edge-case contract note 445: serialized memoization values remain isolated.",
-+    "edge-case contract note 446: serialized memoization values remain isolated.",
-+    "edge-case contract note 447: serialized memoization values remain isolated.",
-+    "edge-case contract note 448: serialized memoization values remain isolated.",
-+    "edge-case contract note 449: serialized memoization values remain isolated.",
-+    "edge-case contract note 450: serialized memoization values remain isolated.",
-+    "edge-case contract note 451: serialized memoization values remain isolated.",
-+    "edge-case contract note 452: serialized memoization values remain isolated.",
-+    "edge-case contract note 453: serialized memoization values remain isolated.",
-+    "edge-case contract note 454: serialized memoization values remain isolated.",
-+    "edge-case contract note 455: serialized memoization values remain isolated.",
-+    "edge-case contract note 456: serialized memoization values remain isolated.",
-+    "edge-case contract note 457: serialized memoization values remain isolated.",
-+    "edge-case contract note 458: serialized memoization values remain isolated.",
-+    "edge-case contract note 459: serialized memoization values remain isolated.",
-+    "edge-case contract note 460: serialized memoization values remain isolated.",
-+    "edge-case contract note 461: serialized memoization values remain isolated.",
-+    "edge-case contract note 462: serialized memoization values remain isolated.",
-+    "edge-case contract note 463: serialized memoization values remain isolated.",
-+    "edge-case contract note 464: serialized memoization values remain isolated.",
-+    "edge-case contract note 465: serialized memoization values remain isolated.",
-+    "edge-case contract note 466: serialized memoization values remain isolated.",
-+    "edge-case contract note 467: serialized memoization values remain isolated.",
-+    "edge-case contract note 468: serialized memoization values remain isolated.",
-+    "edge-case contract note 469: serialized memoization values remain isolated.",
-+    "edge-case contract note 470: serialized memoization values remain isolated.",
-+]
++    assert await cache.keys() == []
