@@ -68,10 +68,6 @@ class WorkflowRunner:
         """Retrieve list of currently executing workflow run IDs."""
         return list(self._active_runs.keys())
 
-    def is_run_active(self, run_id: str) -> bool:
-        """Check if a specific workflow run ID is currently active."""
-        return run_id in self._active_runs
-
     def validate_dag(self, dag: DAGSpec) -> None:
         """Validate DAG structural integrity before execution.
 
@@ -277,10 +273,6 @@ class WorkflowRunner:
             step_attempts=context.step_attempts(),
             error_message=error_message,
         )
-
-    def is_run_active(self, run_id: str) -> bool:
-        """Check if a workflow execution run is currently registered as active."""
-        return run_id in self._active_runs
 
     async def _execute_level(
         self, steps: list[StepSpec], context: ExecutionContext, cancel_event: asyncio.Event

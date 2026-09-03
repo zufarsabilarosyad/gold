@@ -545,7 +545,7 @@ index e0857a4..0ebf167 100644
          except Exception as exc:
              logger.error(
                  f"Workflow execution pipeline crashed for run '{active_run_id}': {exc}",
-@@ -267,9 +274,53 @@ class WorkflowRunner:
+@@ -267,9 +274,49 @@ class WorkflowRunner:
              inputs=context.inputs.copy(),
              outputs=context.get_all_step_outputs(),
              step_states=context.get_all_step_states(),
@@ -553,10 +553,6 @@ index e0857a4..0ebf167 100644
              error_message=error_message,
          )
  
-+    def is_run_active(self, run_id: str) -> bool:
-+        """Check if a workflow execution run is currently registered as active."""
-+        return run_id in self._active_runs
-+
 +    async def _execute_level(
 +        self, steps: list[StepSpec], context: ExecutionContext, cancel_event: asyncio.Event
 +    ) -> dict[str, tuple[StepState, dict[str, Any], str | None]]:
