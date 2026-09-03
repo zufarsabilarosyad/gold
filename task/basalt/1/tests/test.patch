@@ -1,0 +1,814 @@
+diff --git a/tests/test_failure_continuation.py b/tests/test_failure_continuation.py
+new file mode 100644
+index 0000000..3f08d8b
+--- /dev/null
++++ b/tests/test_failure_continuation.py
+@@ -0,0 +1,429 @@
++"""Behavioral coverage for failure actions across workflow branches."""
++
++import asyncio
++
++import pytest
++
++from basalt.core.dag.ast import DAGSpec, ExecutorType, OnFailureAction, StepSpec
++from basalt.core.engine.context import ExecutionContext
++from basalt.core.engine.hooks import HookRegistry, LifecycleEvent
++from basalt.core.engine.runner import WorkflowRunner
++from basalt.core.engine.state_machine import StepState, WorkflowState
++from basalt.core.executors.inline import (
++    clear_python_callable_registry,
++    register_python_callable,
++)
++from basalt.storage.database import DatabaseManager
++from basalt.storage.repository import BasaltRepository
++
++
++@pytest.fixture(autouse=True)
++def clean_registry():
++    clear_python_callable_registry()
++    yield
++    clear_python_callable_registry()
++
++
++def register_success(name: str, marker: list[str]) -> None:
++    def callable() -> dict[str, str]:
++        marker.append(name)
++        return {"name": name}
++
++    register_python_callable(name, callable)
++
++
++def register_failure(name: str) -> None:
++    def callable() -> dict:
++        raise RuntimeError(name)
++
++    register_python_callable(name, callable)
++
++
++def inline(
++    step_id: str,
++    callable_name: str,
++    depends_on: list[str] | None = None,
++    on_failure: OnFailureAction = OnFailureAction.FAIL_FAST,
++) -> StepSpec:
++    return StepSpec(
++        id=step_id,
++        executor_type=ExecutorType.PYTHON_INLINE,
++        callable_name=callable_name,
++        depends_on=depends_on or [],
++        on_failure=on_failure,
++    )
++
++
++@pytest.mark.asyncio
++async def test_continue_runs_independent_branch_after_failure():
++    marker: list[str] = []
++    register_failure("bad")
++    register_success("root_ok", marker)
++    register_success("good", marker)
++    bad = inline("bad", "bad", on_failure=OnFailureAction.CONTINUE)
++    dag = DAGSpec(
++        id="continue",
++        version="1",
++        steps=[
++            inline("root_ok", "root_ok"),
++            bad,
++            inline("good", "good", depends_on=["root_ok"]),
++        ],
++    )
++    result = await WorkflowRunner().run_async(dag)
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["bad"] == StepState.FAILED
++    assert result.step_states["good"] == StepState.COMPLETED
++    assert result.step_attempts["good"] == 1
++    assert "good" in marker
++
++
++@pytest.mark.asyncio
++async def test_continue_skips_direct_dependant_of_failed_step():
++    marker: list[str] = []
++    register_failure("bad")
++    register_success("root_ok", marker)
++    register_success("child", marker)
++    register_success("worker", marker)
++    bad = inline("bad", "bad", on_failure=OnFailureAction.CONTINUE)
++    dag = DAGSpec(
++        id="child",
++        version="1",
++        steps=[
++            inline("root_ok", "root_ok"),
++            bad,
++            inline("child", "child", depends_on=["bad"]),
++            inline("worker", "worker", depends_on=["root_ok"]),
++        ],
++    )
++    result = await WorkflowRunner().run_async(dag)
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["child"] == StepState.SKIPPED
++    assert result.step_states["worker"] == StepState.COMPLETED
++    assert result.step_attempts["worker"] == 1
++    assert "child" not in marker
++    assert "worker" in marker
++
++
++@pytest.mark.asyncio
++async def test_continue_skips_transitive_dependants_but_not_other_roots():
++    marker: list[str] = []
++    register_failure("bad")
++    register_success("other_root", marker)
++    register_success("middle", marker)
++    register_success("leaf", marker)
++    register_success("other_worker", marker)
++    register_success("other_leaf", marker)
++
++    bad = inline("bad", "bad", on_failure=OnFailureAction.CONTINUE)
++    dag = DAGSpec(
++        id="tree",
++        version="1",
++        steps=[
++            bad,
++            inline("other_root", "other_root"),
++            inline("middle", "middle", ["bad"]),
++            inline("leaf", "leaf", ["middle"]),
++            inline("other_worker", "other_worker", ["other_root"]),
++            inline("other_leaf", "other_leaf", ["other_worker"]),
++        ],
++    )
++    result = await WorkflowRunner().run_async(dag)
++    assert result.step_states["middle"] == StepState.SKIPPED
++    assert result.step_states["leaf"] == StepState.SKIPPED
++    assert result.step_states["other_worker"] == StepState.COMPLETED
++    assert result.step_states["other_leaf"] == StepState.COMPLETED
++    assert result.step_attempts["other_leaf"] == 1
++    assert "middle" not in marker
++    assert "leaf" not in marker
++    assert "other_leaf" in marker
++
++
++@pytest.mark.asyncio
++async def test_default_failure_action_preserves_fast_fail():
++    marker: list[str] = []
++    register_failure("bad")
++    register_success("start", marker)
++    register_success("other", marker)
++    register_success("later", marker)
++    dag = DAGSpec(
++        id="fast",
++        version="1",
++        steps=[
++            inline("start", "start"),
++            inline("bad", "bad", ["start"]),
++            inline("other", "other", ["start"]),
++            inline("later", "later", ["other"]),
++        ],
++    )
++    result = await WorkflowRunner().run_async(dag)
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["later"] == StepState.SKIPPED
++    assert result.step_attempts["start"] == 1
++    assert result.step_attempts["bad"] == 1
++    assert marker == ["start", "other"]
++
++
++@pytest.mark.asyncio
++async def test_continue_diamond_dag_skips_join_node():
++    marker: list[str] = []
++    register_success("root", marker)
++    register_failure("branch_fail")
++    register_success("branch_ok", marker)
++    register_success("b2", marker)
++    register_success("join_step", marker)
++
++    dag = DAGSpec(
++        id="diamond_continue",
++        steps=[
++            inline("root", "root"),
++            inline("branch_fail", "branch_fail", ["root"], on_failure=OnFailureAction.CONTINUE),
++            inline("branch_ok", "branch_ok", ["root"]),
++            inline("b2", "b2", ["branch_ok"]),
++            inline("join_step", "join_step", ["branch_fail", "b2"]),
++        ],
++    )
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["root"] == StepState.COMPLETED
++    assert result.step_states["branch_fail"] == StepState.FAILED
++    assert result.step_states["branch_ok"] == StepState.COMPLETED
++    assert result.step_states["b2"] == StepState.COMPLETED
++    assert result.step_states["join_step"] == StepState.SKIPPED
++    assert result.step_attempts["b2"] == 1
++    assert marker == ["root", "branch_ok", "b2"]
++
++
++@pytest.mark.asyncio
++async def test_continue_workflow_state_is_failed_overall():
++    marker: list[str] = []
++    register_success("root_node", marker)
++    register_failure("failing_branch")
++    register_success("worker_1", marker)
++    register_success("worker_2", marker)
++
++    dag = DAGSpec(
++        id="overall_failed_check",
++        steps=[
++            inline("root_node", "root_node"),
++            inline("failing_branch", "failing_branch", ["root_node"], on_failure=OnFailureAction.CONTINUE),
++            inline("worker_1", "worker_1", ["root_node"]),
++            inline("worker_2", "worker_2", ["worker_1"]),
++        ],
++    )
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["failing_branch"] == StepState.FAILED
++    assert result.step_states["worker_1"] == StepState.COMPLETED
++    assert result.step_states["worker_2"] == StepState.COMPLETED
++    assert result.step_attempts["worker_2"] == 1
++    assert not result.is_success()
++    assert result.is_failed()
++
++
++@pytest.mark.asyncio
++async def test_mixed_failure_actions_fail_fast_wins():
++    marker: list[str] = []
++    register_success("root_seed", marker)
++    register_failure("fail_continue")
++    register_failure("fail_fast_step")
++    register_success("downstream_independent", marker)
++
++    dag = DAGSpec(
++        id="mixed_fail_actions",
++        steps=[
++            inline("root_seed", "root_seed"),
++            inline("fail_continue", "fail_continue", ["root_seed"], on_failure=OnFailureAction.CONTINUE),
++            inline("fail_fast_step", "fail_fast_step", ["root_seed"], on_failure=OnFailureAction.FAIL_FAST),
++            inline("downstream_independent", "downstream_independent", ["root_seed"]),
++            inline("downstream_later", "downstream_independent", ["downstream_independent"]),
++        ],
++    )
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["fail_continue"] == StepState.FAILED
++    assert result.step_states["fail_fast_step"] == StepState.FAILED
++    assert result.step_states["downstream_later"] == StepState.SKIPPED
++    assert result.step_attempts["fail_fast_step"] == 1
++
++
++@pytest.mark.asyncio
++async def test_continue_lifecycle_hooks_contain_skipped_events():
++    marker: list[str] = []
++    skipped_steps: list[str] = []
++    register_success("root_hook", marker)
++    register_failure("bad_hook_step")
++    register_success("child_hook_step", marker)
++    register_success("grandchild_hook_step", marker)
++    register_success("independent_step", marker)
++    register_success("independent_later", marker)
++
++    hooks = HookRegistry()
++
++    async def on_skip(_, __, payload):
++        skipped_steps.append(payload.get("step_id"))
++
++    hooks.register(LifecycleEvent.STEP_SKIPPED, on_skip)
++
++    dag = DAGSpec(
++        id="hook_skip_dag",
++        steps=[
++            inline("root_hook", "root_hook"),
++            inline("bad_hook_step", "bad_hook_step", ["root_hook"], on_failure=OnFailureAction.CONTINUE),
++            inline("child_hook_step", "child_hook_step", ["bad_hook_step"]),
++            inline("grandchild_hook_step", "grandchild_hook_step", ["child_hook_step"]),
++            inline("independent_step", "independent_step", ["root_hook"]),
++            inline("independent_later", "independent_later", ["independent_step"]),
++        ],
++    )
++    result = await WorkflowRunner(hook_registry=hooks).run_async(dag)
++
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["independent_later"] == StepState.COMPLETED
++    assert result.step_attempts["independent_later"] == 1
++    assert "child_hook_step" in skipped_steps
++    assert "grandchild_hook_step" in skipped_steps
++    assert "child_hook_step" not in marker
++
++
++@pytest.mark.asyncio
++async def test_continue_with_three_independent_branches():
++    marker: list[str] = []
++    register_failure("branch_1_a")
++    register_success("branch_1_b", marker)
++    register_success("branch_2_a", marker)
++    register_success("branch_2_b", marker)
++    register_success("branch_3_a", marker)
++    register_success("branch_3_b", marker)
++
++    dag = DAGSpec(
++        id="three_branches_dag",
++        steps=[
++            inline("b1_a", "branch_1_a", on_failure=OnFailureAction.CONTINUE),
++            inline("b1_b", "branch_1_b", ["b1_a"]),
++            inline("b2_a", "branch_2_a"),
++            inline("b2_b", "branch_2_b", ["b2_a"]),
++            inline("b3_a", "branch_3_a"),
++            inline("b3_b", "branch_3_b", ["b3_a"]),
++        ],
++    )
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["b1_a"] == StepState.FAILED
++    assert result.step_states["b1_b"] == StepState.SKIPPED
++    assert result.step_states["b2_a"] == StepState.COMPLETED
++    assert result.step_states["b2_b"] == StepState.COMPLETED
++    assert result.step_states["b3_a"] == StepState.COMPLETED
++    assert result.step_states["b3_b"] == StepState.COMPLETED
++    assert result.step_attempts["b2_b"] == 1
++    assert "branch_1_b" not in marker
++    assert set(marker) == {"branch_2_a", "branch_2_b", "branch_3_a", "branch_3_b"}
++
++
++@pytest.mark.asyncio
++async def test_continue_persistence_in_sqlite(tmp_path):
++    db_file = tmp_path / "test_continue_persist.db"
++    db_url = f"sqlite+aiosqlite:///{db_file}"
++    db_mgr = DatabaseManager(database_url=db_url)
++    repo = BasaltRepository(db_manager=db_mgr)
++    await repo.initialize()
++
++    marker: list[str] = []
++    register_success("sql_root", marker)
++    register_failure("sql_bad")
++    register_success("sql_good", marker)
++    register_success("sql_child", marker)
++    register_success("sql_good_2", marker)
++
++    dag = DAGSpec(
++        id="dag_sql_continue",
++        steps=[
++            inline("sql_root", "sql_root"),
++            inline("sql_bad", "sql_bad", ["sql_root"], on_failure=OnFailureAction.CONTINUE),
++            inline("sql_child", "sql_child", ["sql_bad"]),
++            inline("sql_good", "sql_good", ["sql_root"]),
++            inline("sql_good_2", "sql_good_2", ["sql_good"]),
++        ],
++    )
++    await repo.save_dag(dag)
++
++    result = await WorkflowRunner().run_async(dag)
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["sql_bad"] == StepState.FAILED
++    assert result.step_states["sql_child"] == StepState.SKIPPED
++    assert result.step_states["sql_good"] == StepState.COMPLETED
++    assert result.step_states["sql_good_2"] == StepState.COMPLETED
++    assert result.step_attempts["sql_good_2"] == 1
++
++    await repo.save_run_result(result)
++    loaded = await repo.get_run(result.run_id)
++
++    assert loaded is not None
++    assert loaded.state == WorkflowState.FAILED
++    assert loaded.step_states["sql_bad"] == StepState.FAILED
++    assert loaded.step_states["sql_child"] == StepState.SKIPPED
++    assert loaded.step_states["sql_good_2"] == StepState.COMPLETED
++    assert loaded.step_attempts["sql_good_2"] == 1
++    await db_mgr.close()
++
++
++@pytest.mark.asyncio
++async def test_continue_step_outputs_ledger_intact():
++    marker: list[str] = []
++    register_success("root_prod", marker)
++    register_failure("ledger_bad")
++
++    def producer_fn() -> dict[str, int]:
++        return {"amount": 500}
++
++    def consumer_fn() -> dict[str, int]:
++        return {"final_val": 1000}
++
++    register_python_callable("producer", producer_fn)
++    register_python_callable("consumer", consumer_fn)
++
++    dag = DAGSpec(
++        id="ledger_dag",
++        steps=[
++            inline("root_prod", "producer"),
++            inline("ledger_bad", "ledger_bad", ["root_prod"], on_failure=OnFailureAction.CONTINUE),
++            inline("ledger_good", "consumer", ["root_prod"]),
++            inline("final_step", "consumer", ["ledger_good"]),
++        ],
++    )
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.state == WorkflowState.FAILED
++    assert result.outputs["ledger_good"] == {"final_val": 1000}
++    assert result.outputs["final_step"] == {"final_val": 1000}
++    assert result.step_attempts["final_step"] == 1
++    assert "ledger_bad" not in result.outputs
++
++
++@pytest.mark.asyncio
++async def test_explicit_fail_fast_action_aborts_independent_branch():
++    marker: list[str] = []
++    register_success("root_start", marker)
++    register_failure("fail_fast_explicit")
++    register_success("independent_later", marker)
++    register_success("later_child", marker)
++
++    dag = DAGSpec(
++        id="explicit_fast_fail_dag",
++        steps=[
++            inline("root_start", "root_start"),
++            inline("fail_fast_explicit", "fail_fast_explicit", ["root_start"], on_failure=OnFailureAction.FAIL_FAST),
++            inline("independent_later", "independent_later", ["root_start"]),
++            inline("later_child", "later_child", ["independent_later"]),
++        ],
++    )
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["fail_fast_explicit"] == StepState.FAILED
++    assert result.step_states["later_child"] == StepState.SKIPPED
++    assert result.step_attempts["fail_fast_explicit"] == 1
+diff --git a/tests/test_retry_policies.py b/tests/test_retry_policies.py
+new file mode 100644
+index 0000000..995b019
+--- /dev/null
++++ b/tests/test_retry_policies.py
+@@ -0,0 +1,373 @@
++"""Behavioral coverage for workflow step retry policies."""
++
++import asyncio
++from datetime import UTC, datetime
++
++import pytest
++
++from basalt.api.router_runs import _to_run_status_response
++from basalt.core.dag.ast import (
++    DAGSpec,
++    ExecutorType,
++    OnFailureAction,
++    RetryPolicySpec,
++    StepSpec,
++)
++from basalt.core.engine.context import ExecutionContext
++from basalt.core.engine.engine import BasaltEngine, EngineConfig
++from basalt.core.engine.hooks import HookRegistry, LifecycleEvent
++from basalt.core.engine.runner import WorkflowRunner
++from basalt.core.engine.state_machine import StepState, WorkflowState
++from basalt.core.executors.inline import (
++    clear_python_callable_registry,
++    register_python_callable,
++)
++from basalt.storage.database import DatabaseManager
++from basalt.storage.repository import BasaltRepository
++
++
++@pytest.fixture(autouse=True)
++def clean_registry():
++    clear_python_callable_registry()
++    yield
++    clear_python_callable_registry()
++
++
++def retry_step(name: str, failures: int, calls: list[int]) -> None:
++    def callable() -> dict[str, int]:
++        calls.append(1)
++        if len(calls) <= failures:
++            raise RuntimeError("temporary")
++        return {"calls": len(calls)}
++
++    register_python_callable(name, callable)
++
++
++def retry_spec(name: str, max_retries: int = 2, jitter: bool = False) -> StepSpec:
++    return StepSpec(
++        id="work",
++        executor_type=ExecutorType.PYTHON_INLINE,
++        callable_name=name,
++        on_failure=OnFailureAction.RETRY,
++        retry_policy=RetryPolicySpec(
++            max_retries=max_retries,
++            initial_delay_seconds=0.001,
++            max_delay_seconds=0.001,
++            backoff_factor=2.0,
++            jitter=jitter,
++        ),
++    )
++
++
++@pytest.mark.asyncio
++async def test_retry_recovers_and_exposes_attempt_count():
++    calls: list[int] = []
++    retry_step("recover", 1, calls)
++    result = await WorkflowRunner().run_async(
++        DAGSpec(id="recover", version="1", steps=[retry_spec("recover")])
++    )
++    assert result.state == WorkflowState.COMPLETED
++    assert result.step_states["work"] == StepState.COMPLETED
++    assert result.step_attempts["work"] == 2
++    assert result.outputs["work"] == {"calls": 2}
++
++
++@pytest.mark.asyncio
++async def test_retry_exhaustion_is_terminal_failure():
++    calls: list[int] = []
++    retry_step("exhaust", 4, calls)
++    result = await WorkflowRunner().run_async(
++        DAGSpec(id="exhaust", version="1", steps=[retry_spec("exhaust", 2)])
++    )
++    assert result.state == WorkflowState.FAILED
++    assert result.step_states["work"] == StepState.FAILED
++    assert result.step_attempts["work"] == 3
++    assert len(calls) == 3
++
++
++@pytest.mark.asyncio
++async def test_retry_hook_receives_each_recoverable_failure():
++    calls: list[int] = []
++    events: list[dict] = []
++    retry_step("hooks", 2, calls)
++    hooks = HookRegistry()
++
++    async def record(_, __, payload):
++        events.append(payload)
++
++    hooks.register(LifecycleEvent.STEP_RETRY, record)
++    result = await WorkflowRunner(hook_registry=hooks).run_async(
++        DAGSpec(id="hooks", version="1", steps=[retry_spec("hooks")])
++    )
++    assert result.is_success()
++    assert [event["attempt"] for event in events] == [1, 2]
++    assert all(event["delay_seconds"] == 0.001 for event in events)
++
++
++@pytest.mark.asyncio
++async def test_fail_fast_does_not_retry_even_with_a_policy():
++    calls: list[int] = []
++    retry_step("fast", 1, calls)
++    step = retry_spec("fast", 3)
++    step.on_failure = OnFailureAction.FAIL_FAST
++    result = await WorkflowRunner().run_async(
++        DAGSpec(id="fast", version="1", steps=[step])
++    )
++    assert result.state == WorkflowState.FAILED
++    assert result.step_attempts["work"] == 1
++    assert len(calls) == 1
++
++
++@pytest.mark.asyncio
++async def test_cancellation_during_retry_wait_prevents_next_attempt():
++    calls: list[int] = []
++    retry_step("cancel", 10, calls)
++    spec = retry_spec("cancel", 4)
++    spec.retry_policy.initial_delay_seconds = 1.0
++    spec.retry_policy.max_delay_seconds = 1.0
++    runner = WorkflowRunner()
++    task = asyncio.create_task(
++        runner.run_async(DAGSpec(id="cancel", version="1", steps=[spec]), run_id="cancel-run")
++    )
++    for _ in range(100):
++        if runner.is_run_active("cancel-run") and calls:
++            break
++        await asyncio.sleep(0.001)
++    assert runner.cancel_run("cancel-run")
++    result = await task
++    assert result.state == WorkflowState.CANCELLED
++    assert result.step_attempts["work"] == 1
++
++
++@pytest.mark.asyncio
++async def test_deterministic_backoff_without_jitter():
++    calls: list[int] = []
++    events: list[dict] = []
++    retry_step("deterministic", 3, calls)
++    spec = StepSpec(
++        id="det_step",
++        executor_type=ExecutorType.PYTHON_INLINE,
++        callable_name="deterministic",
++        on_failure=OnFailureAction.RETRY,
++        retry_policy=RetryPolicySpec(
++            max_retries=3,
++            initial_delay_seconds=0.005,
++            backoff_factor=2.0,
++            jitter=False,
++        ),
++    )
++    hooks = HookRegistry()
++
++    async def on_retry(_, __, payload):
++        events.append(payload)
++
++    hooks.register(LifecycleEvent.STEP_RETRY, on_retry)
++    result = await WorkflowRunner(hook_registry=hooks).run_async(
++        DAGSpec(id="det_dag", steps=[spec])
++    )
++    assert result.is_success()
++    delays = [round(e["delay_seconds"], 5) for e in events]
++    assert delays == [0.005, 0.01, 0.02]
++
++
++@pytest.mark.asyncio
++async def test_retry_lifecycle_hooks_complete_sequence():
++    calls: list[int] = []
++    lifecycle_history: list[tuple[str, int]] = []
++    retry_step("lifecycle", 1, calls)
++    hooks = HookRegistry()
++
++    async def on_start(_, __, payload):
++        lifecycle_history.append(("START", payload.get("attempt", 1)))
++
++    async def on_retry(_, __, payload):
++        lifecycle_history.append(("RETRY", payload.get("attempt", 1)))
++
++    async def on_success(_, __, payload):
++        lifecycle_history.append(("SUCCESS", payload.get("attempt", 1)))
++
++    hooks.register(LifecycleEvent.STEP_START, on_start)
++    hooks.register(LifecycleEvent.STEP_RETRY, on_retry)
++    hooks.register(LifecycleEvent.STEP_SUCCESS, on_success)
++
++    result = await WorkflowRunner(hook_registry=hooks).run_async(
++        DAGSpec(id="life_dag", steps=[retry_spec("lifecycle", max_retries=2)])
++    )
++    assert result.is_success()
++    assert lifecycle_history == [
++        ("START", 1),
++        ("RETRY", 1),
++        ("START", 2),
++        ("SUCCESS", 2),
++    ]
++
++
++@pytest.mark.asyncio
++async def test_retry_with_multiple_failing_steps_in_same_level():
++    calls_a: list[int] = []
++    calls_b: list[int] = []
++    retry_step("step_a_fn", 1, calls_a)
++    retry_step("step_b_fn", 2, calls_b)
++
++    step_a = StepSpec(
++        id="step_a",
++        executor_type=ExecutorType.PYTHON_INLINE,
++        callable_name="step_a_fn",
++        on_failure=OnFailureAction.RETRY,
++        retry_policy=RetryPolicySpec(max_retries=2, initial_delay_seconds=0.001, jitter=False),
++    )
++    step_b = StepSpec(
++        id="step_b",
++        executor_type=ExecutorType.PYTHON_INLINE,
++        callable_name="step_b_fn",
++        on_failure=OnFailureAction.RETRY,
++        retry_policy=RetryPolicySpec(max_retries=3, initial_delay_seconds=0.001, jitter=False),
++    )
++
++    dag = DAGSpec(id="multi_retry_dag", steps=[step_a, step_b])
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.state == WorkflowState.COMPLETED
++    assert result.step_states["step_a"] == StepState.COMPLETED
++    assert result.step_states["step_b"] == StepState.COMPLETED
++    assert result.step_attempts["step_a"] == 2
++    assert result.step_attempts["step_b"] == 3
++
++
++@pytest.mark.asyncio
++async def test_cancellation_during_executor_execution_prevents_retry():
++    calls: list[int] = []
++
++    def slow_callable():
++        calls.append(1)
++        import time
++        time.sleep(0.3)
++        raise RuntimeError("failed after delay")
++
++    register_python_callable("slow_step_fn", slow_callable)
++
++    step = StepSpec(
++        id="slow_step",
++        executor_type=ExecutorType.PYTHON_INLINE,
++        callable_name="slow_step_fn",
++        on_failure=OnFailureAction.RETRY,
++        retry_policy=RetryPolicySpec(max_retries=3, initial_delay_seconds=0.01),
++    )
++
++    runner = WorkflowRunner()
++    run_task = asyncio.create_task(
++        runner.run_async(DAGSpec(id="cancel_exec_dag", steps=[step]), run_id="cancel_exec_run")
++    )
++    for _ in range(100):
++        if runner.is_run_active("cancel_exec_run") and calls:
++            break
++        await asyncio.sleep(0.001)
++
++    assert runner.cancel_run("cancel_exec_run")
++    res = await run_task
++
++    assert res.state == WorkflowState.CANCELLED
++    assert res.step_attempts["slow_step"] == 1
++    assert len(calls) == 1
++
++
++@pytest.mark.asyncio
++async def test_retry_step_persistence_in_sqlite(tmp_path):
++    db_file = tmp_path / "test_retry_persist.db"
++    db_url = f"sqlite+aiosqlite:///{db_file}"
++    db_mgr = DatabaseManager(database_url=db_url)
++    repo = BasaltRepository(db_manager=db_mgr)
++    await repo.initialize()
++
++    calls: list[int] = []
++    retry_step("persist_fn", 2, calls)
++
++    dag = DAGSpec(
++        id="dag_persist",
++        steps=[
++            StepSpec(
++                id="persist_step",
++                executor_type=ExecutorType.PYTHON_INLINE,
++                callable_name="persist_fn",
++                on_failure=OnFailureAction.RETRY,
++                retry_policy=RetryPolicySpec(max_retries=3, initial_delay_seconds=0.001),
++            )
++        ],
++    )
++    await repo.save_dag(dag)
++
++    result = await WorkflowRunner().run_async(dag)
++    assert result.state == WorkflowState.COMPLETED
++    assert result.step_attempts["persist_step"] == 3
++
++    await repo.save_run_result(result)
++    persisted = await repo.get_run(result.run_id)
++
++    assert persisted is not None
++    assert persisted.state == WorkflowState.COMPLETED
++    assert persisted.step_attempts["persist_step"] == 3
++    await db_mgr.close()
++
++
++@pytest.mark.asyncio
++async def test_retry_attempt_surfaced_in_api_responses():
++    calls: list[int] = []
++    retry_step("api_step_fn", 1, calls)
++
++    dag = DAGSpec(
++        id="api_dag",
++        steps=[
++            StepSpec(
++                id="step_api",
++                executor_type=ExecutorType.PYTHON_INLINE,
++                callable_name="api_step_fn",
++                on_failure=OnFailureAction.RETRY,
++                retry_policy=RetryPolicySpec(max_retries=2, initial_delay_seconds=0.001),
++            )
++        ],
++    )
++
++    result = await WorkflowRunner().run_async(dag)
++    status_resp = _to_run_status_response(result)
++
++    assert status_resp.state == WorkflowState.COMPLETED
++    step_runs = {sr.step_id: sr for sr in status_resp.step_runs}
++    assert "step_api" in step_runs
++    assert step_runs["step_api"].attempt == 2
++    assert step_runs["step_api"].state == StepState.COMPLETED
++
++
++@pytest.mark.asyncio
++async def test_retry_recovery_enables_dependent_downstream_step():
++    calls: list[int] = []
++    retry_step("parent_fn", 1, calls)
++
++    def child_fn(parent_val: int) -> dict[str, int]:
++        return {"multiplied": parent_val * 10}
++
++    register_python_callable("child_fn", child_fn)
++
++    parent_step = StepSpec(
++        id="parent",
++        executor_type=ExecutorType.PYTHON_INLINE,
++        callable_name="parent_fn",
++        on_failure=OnFailureAction.RETRY,
++        retry_policy=RetryPolicySpec(max_retries=2, initial_delay_seconds=0.001),
++    )
++    child_step = StepSpec(
++        id="child",
++        executor_type=ExecutorType.PYTHON_INLINE,
++        callable_name="child_fn",
++        parameters={"parent_val": "${steps.parent.output.calls}"},
++        depends_on=["parent"],
++    )
++
++    dag = DAGSpec(id="dep_dag", steps=[parent_step, child_step])
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.state == WorkflowState.COMPLETED
++    assert result.step_states["parent"] == StepState.COMPLETED
++    assert result.step_states["child"] == StepState.COMPLETED
++    assert result.step_attempts["parent"] == 2
++    assert result.step_attempts["child"] == 1
++    assert result.outputs["child"]["multiplied"] == 20

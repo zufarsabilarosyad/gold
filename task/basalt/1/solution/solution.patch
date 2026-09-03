@@ -1,0 +1,907 @@
+diff --git a/src/basalt/api/router_runs.py b/src/basalt/api/router_runs.py
+index 5338140..2a7fba5 100644
+--- a/src/basalt/api/router_runs.py
++++ b/src/basalt/api/router_runs.py
+@@ -40,11 +40,13 @@ def _to_run_status_response(result: WorkflowRunResult) -> RunStatusResponse:
+         StepRunResponse(
+             step_id=step_id,
+             state=state,
++            attempt=result.step_attempts.get(step_id, 1),
+             output=result.outputs.get(step_id),
+         )
+         for step_id, state in result.step_states.items()
+     ]
+ 
++
+     return RunStatusResponse(
+         run_id=result.run_id,
+         dag_id=result.dag_id,
+@@ -204,10 +206,12 @@ async def get_step_run_output(
+         "dag_id": result.dag_id,
+         "step_id": step_id,
+         "state": result.step_states[step_id].value,
++        "attempt": result.step_attempts.get(step_id, 1),
+         "output": result.outputs.get(step_id),
+     }
+ 
+ 
++
+ @router.post(
+     "/runs/{run_id}/cancel",
+     status_code=status.HTTP_200_OK,
+diff --git a/src/basalt/cli/commands_run.py b/src/basalt/cli/commands_run.py
+index 257d31f..3a766e4 100644
+--- a/src/basalt/cli/commands_run.py
++++ b/src/basalt/cli/commands_run.py
+@@ -180,8 +180,10 @@ def get_step_output_cmd(run_id: str, step_id: str, db_url: str | None, output_fo
+                 "dag_id": result.dag_id,
+                 "step_id": step_id,
+                 "state": result.step_states[step_id].value,
++                "attempt": result.step_attempts.get(step_id, 1),
+                 "output": result.outputs.get(step_id),
+             }
++
+             click.echo(CLIFormatter.format_json(step_data))
+ 
+     try:
+diff --git a/src/basalt/cli/formatter.py b/src/basalt/cli/formatter.py
+index 9f3c4eb..8fce120 100644
+--- a/src/basalt/cli/formatter.py
++++ b/src/basalt/cli/formatter.py
+@@ -175,14 +175,16 @@ class CLIFormatter:
+         summary_table = cls.format_table(headers, rows, title=f"Run Result: {result.run_id}")
+ 
+         # Render step states table
+-        step_headers = ["Step ID", "Execution State", "Output Summary"]
++        step_headers = ["Step ID", "Execution State", "Attempts", "Output Summary"]
+         step_rows = []
+         for step_id, state in result.step_states.items():
+             output_val = result.outputs.get(step_id)
+             output_str = json.dumps(output_val) if output_val else "-"
+             if len(output_str) > 40:
+                 output_str = output_str[:37] + "..."
+-            step_rows.append([step_id, state.value.upper(), output_str])
++            attempts = result.step_attempts.get(step_id, 1)
++            step_rows.append([step_id, state.value.upper(), str(attempts), output_str])
++
+ 
+         steps_table = cls.format_table(step_headers, step_rows, title="Step Execution States")
+         return f"{summary_table}\n\n{steps_table}"
+diff --git a/src/basalt/core/dag/ast.py b/src/basalt/core/dag/ast.py
+index 8a3ce1f..e10675a 100644
+--- a/src/basalt/core/dag/ast.py
++++ b/src/basalt/core/dag/ast.py
+@@ -68,6 +68,17 @@ class RetryPolicySpec(BaseModel):
+         description="Apply randomized jitter to backoff delay interval.",
+     )
+ 
++    @model_validator(mode="before")
++    @classmethod
++    def handle_interval_alias(cls, data: Any) -> Any:
++        """Map initial_interval_seconds YAML alias to initial_delay_seconds."""
++        if isinstance(data, dict):
++            if "initial_interval_seconds" in data and "initial_delay_seconds" not in data:
++                data = dict(data)
++                data["initial_delay_seconds"] = data["initial_interval_seconds"]
++        return data
++
++
+ 
+ class StepSpec(BaseModel):
+     """Specification schema for an individual workflow task step."""
+diff --git a/src/basalt/core/engine/context.py b/src/basalt/core/engine/context.py
+index 6fedc2b..0a0c957 100644
+--- a/src/basalt/core/engine/context.py
++++ b/src/basalt/core/engine/context.py
+@@ -80,6 +80,53 @@ class ExecutionContext:
+             else:
+                 self._step_records[step_id].state = state
+ 
++    def begin_attempt(self, step_id: str, max_retries: int) -> int:
++        """Start an execution attempt while retaining retry metadata for status reporting."""
++        with self._lock:
++            record = self._step_records.get(step_id)
++            if record is None:
++                record = StepExecutionRecord(step_id=step_id, attempt=0, max_retries=max_retries)
++                self._step_records[step_id] = record
++            record.attempt += 1
++            record.max_retries = max_retries
++            record.mark_running()
++            self._step_states[step_id] = StepState.RUNNING
++            return record.attempt
++
++    def mark_retrying(self, step_id: str, error: str, delay_seconds: float = 0.0) -> None:
++        """Expose a recoverable failure without resetting the current attempt count."""
++        with self._lock:
++            record = self._step_records.get(step_id)
++            if record is not None:
++                record.state = StepState.RETRYING
++                record.error_message = error
++            self._step_states[step_id] = StepState.RETRYING
++
++    def set_step_attempt(self, step_id: str, attempt: int) -> None:
++        """Explicitly set attempt count on active step execution record."""
++        with self._lock:
++            record = self._step_records.get(step_id)
++            if record is not None:
++                record.attempt = attempt
++            else:
++                self._step_records[step_id] = StepExecutionRecord(step_id=step_id, attempt=attempt)
++
++    def get_step_attempt(self, step_id: str) -> int:
++        """Retrieve execution attempt count recorded for a step."""
++        with self._lock:
++            record = self._step_records.get(step_id)
++            return record.attempt if record is not None else 1
++
++    def step_attempts(self) -> dict[str, int]:
++        """Return completed or in-flight attempt counts by step ID."""
++        with self._lock:
++            return {step_id: record.attempt for step_id, record in self._step_records.items()}
++
++    def get_all_step_attempts(self) -> dict[str, int]:
++        """Return snapshot dictionary mapping all step IDs to their attempt counts."""
++        return self.step_attempts()
++
++
+     def get_step_state(self, step_id: str) -> StepState:
+         """Retrieve active state for a step.
+ 
+diff --git a/b/src/basalt/core/engine/retry_control.py b/b/src/basalt/core/engine/retry_control.py
+new file mode 100644
+index 0000000..7cefdda
+--- /dev/null
++++ b/src/basalt/core/engine/retry_control.py
+@@ -0,0 +1,292 @@
++"""Reusable policy control for retryable workflow step execution.
++
++The runner owns DAG ordering; this module owns the state machine that
++turns a failed attempt into either a final result, a retry notification, or a
++cancelled wait. Keeping it separate makes the public retry contract usable by
++alternative runners without coupling it to a particular executor.
++"""
++
++import asyncio
++from collections.abc import Awaitable, Callable
++from dataclasses import dataclass, field
++from datetime import UTC, datetime
++from typing import Any
++
++from basalt.core.dag.ast import RetryPolicySpec
++from basalt.core.engine.state_machine import StepState
++from basalt.core.resilience.backoff import BackoffPolicy, JitterStrategy
++from basalt.utils.logger import get_logger
++
++logger = get_logger(__name__)
++
++AttemptResult = tuple[StepState, dict[str, Any], str | None]
++AttemptCallable = Callable[[], Awaitable[AttemptResult]]
++RetryCallback = Callable[[int, str | None, float], Awaitable[None]]
++
++
++@dataclass(frozen=True)
++class RetryStatus:
++    """A serializable description of one decision made by a retry loop."""
++
++    attempt: int
++    retries_remaining: int
++    state: StepState
++    delay_seconds: float = 0.0
++    cancelled: bool = False
++
++    @property
++    def terminal(self) -> bool:
++        """Whether no further attempt may be started."""
++        return self.cancelled or self.state in {
++            StepState.COMPLETED,
++            StepState.FAILED,
++            StepState.TIMEOUT,
++            StepState.CANCELLED,
++        }
++
++    def as_dict(self) -> dict[str, Any]:
++        """Expose stable primitive values for hook and API consumers."""
++        return {
++            "attempt": self.attempt,
++            "retries_remaining": self.retries_remaining,
++            "state": self.state.value,
++            "delay_seconds": self.delay_seconds,
++            "cancelled": self.cancelled,
++            "terminal": self.terminal,
++        }
++
++
++@dataclass
++class RetryAuditRecord:
++    """Audit log entry capturing details of an individual retry transition."""
++
++    attempt: int
++    state: StepState
++    delay_seconds: float
++    error_message: str | None = None
++    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
++
++    def to_dict(self) -> dict[str, Any]:
++        """Serialize audit record to dictionary."""
++        return {
++            "attempt": self.attempt,
++            "state": self.state.value,
++            "delay_seconds": self.delay_seconds,
++            "error_message": self.error_message,
++            "timestamp": self.timestamp.isoformat(),
++        }
++
++
++@dataclass
++class RetryMetrics:
++    """Summary metrics describing the outcome of a step retry sequence."""
++
++    total_attempts: int = 0
++    total_retries: int = 0
++    total_delay_seconds: float = 0.0
++    exhausted: bool = False
++    recovered: bool = False
++    cancelled: bool = False
++
++    def to_dict(self) -> dict[str, Any]:
++        """Convert retry metrics into dictionary representation."""
++        return {
++            "total_attempts": self.total_attempts,
++            "total_retries": self.total_retries,
++            "total_delay_seconds": self.total_delay_seconds,
++            "exhausted": self.exhausted,
++            "recovered": self.recovered,
++            "cancelled": self.cancelled,
++        }
++
++
++class RetrySchedule:
++    """Translate a DAG retry specification into deterministic retry decisions."""
++
++    def __init__(self, policy: RetryPolicySpec | None, enabled: bool) -> None:
++        self.policy = policy or RetryPolicySpec()
++        self.enabled = enabled
++        self.max_retries = self.policy.max_retries if enabled else 0
++        self.backoff = BackoffPolicy(
++            initial_delay_seconds=self.policy.initial_delay_seconds,
++            max_delay_seconds=self.policy.max_delay_seconds,
++            backoff_factor=self.policy.backoff_factor,
++            jitter=JitterStrategy.FULL if self.policy.jitter else JitterStrategy.NONE,
++        )
++
++    @property
++    def max_attempts(self) -> int:
++        """The initial attempt plus the configured retry budget."""
++        return self.max_retries + 1
++
++    def can_retry(self, attempt: int, state: StepState) -> bool:
++        """Only failed and timed-out attempts consume the retry budget."""
++        return state in {StepState.FAILED, StepState.TIMEOUT} and attempt <= self.max_retries
++
++    def delay_for(self, attempt: int) -> float:
++        """Return the wait after a failed one-based attempt."""
++        if not self.can_retry(attempt, StepState.FAILED):
++            return 0.0
++        return self.backoff.calculate_delay(attempt)
++
++    def status_for(self, attempt: int, state: StepState) -> RetryStatus:
++        """Build the public status for an attempt outcome."""
++        retrying = self.can_retry(attempt, state)
++        return RetryStatus(
++            attempt=attempt,
++            retries_remaining=max(0, self.max_retries - attempt + 1) if retrying else 0,
++            state=StepState.RETRYING if retrying else state,
++            delay_seconds=self.delay_for(attempt) if retrying else 0.0,
++        )
++
++    def summary(self) -> dict[str, Any]:
++        """Return high-level summary of retry schedule configuration."""
++        return {
++            "enabled": self.enabled,
++            "max_retries": self.max_retries,
++            "max_attempts": self.max_attempts,
++            "initial_delay_seconds": self.policy.initial_delay_seconds,
++            "max_delay_seconds": self.policy.max_delay_seconds,
++            "backoff_factor": self.policy.backoff_factor,
++            "jitter": self.policy.jitter,
++        }
++
++
++class CancellableSleeper:
++    """Wait for a retry delay, returning early when workflow cancellation wins."""
++
++    @staticmethod
++    async def wait(cancel_event: asyncio.Event, delay_seconds: float) -> bool:
++        """Return True when cancellation was signalled before the delay elapsed."""
++        if cancel_event.is_set():
++            return True
++        if delay_seconds <= 0:
++            await asyncio.sleep(0)
++            return cancel_event.is_set()
++        try:
++            await asyncio.wait_for(cancel_event.wait(), timeout=delay_seconds)
++            return True
++        except asyncio.TimeoutError:
++            return cancel_event.is_set()
++
++
++class RetryController:
++    """Run an async attempt callable according to a RetrySchedule.
++
++    It intentionally has no knowledge of DAGs, executors, hooks, or storage.
++    Callers provide a fresh attempt callable and optionally observe each retry.
++    This keeps retry accounting consistent for subprocess, HTTP, and inline
++    executors while allowing the workflow runner to own context mutation.
++    """
++
++    def __init__(self, schedule: RetrySchedule, cancel_event: asyncio.Event) -> None:
++        self.schedule = schedule
++        self.cancel_event = cancel_event
++        self.history: list[RetryStatus] = []
++        self.audit_log: list[RetryAuditRecord] = []
++
++    @property
++    def attempts_started(self) -> int:
++        """Number of attempt callables invoked so far."""
++        return len(self.history)
++
++    @property
++    def last_status(self) -> RetryStatus | None:
++        """Most recent retry decision, if execution has started."""
++        return self.history[-1] if self.history else None
++
++    def get_metrics(self) -> RetryMetrics:
++        """Compute aggregate retry metrics from execution history."""
++        total_attempts = len(self.history)
++        total_retries = max(0, total_attempts - 1)
++        total_delay = sum(
++            r.delay_seconds for r in self.history if r.state == StepState.RETRYING
++        )
++        is_cancelled = any(r.cancelled for r in self.history)
++        is_recovered = (
++            total_retries > 0
++            and bool(self.history)
++            and self.history[-1].state == StepState.COMPLETED
++        )
++        is_exhausted = (
++            total_attempts >= self.schedule.max_attempts
++            and bool(self.history)
++            and self.history[-1].state in (StepState.FAILED, StepState.TIMEOUT)
++        )
++        return RetryMetrics(
++            total_attempts=total_attempts,
++            total_retries=total_retries,
++            total_delay_seconds=total_delay,
++            exhausted=is_exhausted,
++            recovered=is_recovered,
++            cancelled=is_cancelled,
++        )
++
++    def get_audit_trail(self) -> list[dict[str, Any]]:
++        """Return list of serialized audit records."""
++        return [record.to_dict() for record in self.audit_log]
++
++    async def run(
++        self, attempt_callable: AttemptCallable, on_retry: RetryCallback | None = None
++    ) -> AttemptResult:
++        """Run attempts until completion, exhaustion, or cancellation."""
++        for attempt in range(1, self.schedule.max_attempts + 1):
++            if self.cancel_event.is_set():
++                status = RetryStatus(attempt - 1, 0, StepState.CANCELLED, cancelled=True)
++                self.history.append(status)
++                self.audit_log.append(
++                    RetryAuditRecord(
++                        attempt=attempt - 1,
++                        state=StepState.CANCELLED,
++                        delay_seconds=0.0,
++                        error_message="Workflow execution cancelled by request.",
++                    )
++                )
++                return StepState.CANCELLED, {}, "Workflow execution cancelled by request."
++
++            state, output, error = await attempt_callable()
++
++            if self.cancel_event.is_set():
++                status = RetryStatus(attempt, 0, StepState.CANCELLED, cancelled=True)
++                self.history.append(status)
++                self.audit_log.append(
++                    RetryAuditRecord(
++                        attempt=attempt,
++                        state=StepState.CANCELLED,
++                        delay_seconds=0.0,
++                        error_message="Workflow execution cancelled by request.",
++                    )
++                )
++                return StepState.CANCELLED, {}, "Workflow execution cancelled by request."
++
++            status = self.schedule.status_for(attempt, state)
++            self.history.append(status)
++            self.audit_log.append(
++                RetryAuditRecord(
++                    attempt=attempt,
++                    state=status.state,
++                    delay_seconds=status.delay_seconds,
++                    error_message=error,
++                )
++            )
++
++            if not self.schedule.can_retry(attempt, state):
++                return state, output, error
++
++            if on_retry is not None:
++                await on_retry(attempt, error, status.delay_seconds)
++
++            if await CancellableSleeper.wait(self.cancel_event, status.delay_seconds):
++                cancelled = RetryStatus(attempt, 0, StepState.CANCELLED, cancelled=True)
++                self.history.append(cancelled)
++                self.audit_log.append(
++                    RetryAuditRecord(
++                        attempt=attempt,
++                        state=StepState.CANCELLED,
++                        delay_seconds=0.0,
++                        error_message="Workflow execution cancelled by request.",
++                    )
++                )
++                return StepState.CANCELLED, {}, "Workflow execution cancelled by request."
++
++        return StepState.FAILED, {}, "Retry controller exhausted unexpectedly."
+diff --git a/src/basalt/core/engine/runner.py b/src/basalt/core/engine/runner.py
+index e0857a4..0ebf167 100644
+--- a/src/basalt/core/engine/runner.py
++++ b/src/basalt/core/engine/runner.py
+@@ -11,9 +11,11 @@ from typing import Any
+ 
+ from pydantic import BaseModel, Field
+ 
+-from basalt.core.dag.ast import DAGSpec, StepSpec
++from basalt.core.dag.ast import DAGSpec, OnFailureAction, StepSpec
+ from basalt.core.dag.sorter import DAGSorter
+ from basalt.core.dag.validator import DAGValidator
++from basalt.core.engine.retry_control import RetryController, RetrySchedule
++
+ from basalt.core.engine.context import ExecutionContext
+ from basalt.core.engine.evaluator import ExpressionEvaluator
+ from basalt.core.engine.hooks import HookRegistry, LifecycleEvent, get_hook_registry
+@@ -37,8 +39,10 @@ class WorkflowRunResult(BaseModel):
+     inputs: dict[str, Any] = Field(default_factory=dict)
+     outputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+     step_states: dict[str, StepState] = Field(default_factory=dict)
++    step_attempts: dict[str, int] = Field(default_factory=dict)
+     error_message: str | None = None
+ 
++
+     def is_success(self) -> bool:
+         """Check if workflow finished in COMPLETED state."""
+         return self.state == WorkflowState.COMPLETED
+@@ -180,29 +184,27 @@ class WorkflowRunner:
+                 if not runnable_steps:
+                     continue
+ 
+-                # Trigger STEP_START hook for all runnable steps in level
+-                for step in runnable_steps:
+-                    await self.hook_registry.trigger(
+-                        LifecycleEvent.STEP_START, context, {"step_id": step.id}
+-                    )
+-
+-                # Execute level steps in parallel via WorkerPool
+-                level_results = await self.worker_pool.execute_steps_parallel(
+-                    runnable_steps, context
++                # Execute level steps in parallel via WorkerPool with retry support
++                level_results = await self._execute_level(
++                    runnable_steps, context, cancel_event
+                 )
+ 
+                 # Process results and trigger step completion hooks
+                 level_failed = False
++                fast_fail = False
+                 for step in runnable_steps:
+                     state, output, step_err = level_results.get(
+                         step.id, (StepState.FAILED, {}, "No result")
+                     )
++                    attempt = context.get_step_attempt(step.id)
+                     if state == StepState.COMPLETED:
+                         await self.hook_registry.trigger(
+                             LifecycleEvent.STEP_SUCCESS,
+                             context,
+-                            {"step_id": step.id, "output": output},
++                            {"step_id": step.id, "attempt": attempt, "output": output},
+                         )
++                    elif state == StepState.CANCELLED:
++                        pass
+                     else:
+                         level_failed = True
+                         if not error_message:
+@@ -210,11 +212,12 @@ class WorkflowRunner:
+                         await self.hook_registry.trigger(
+                             LifecycleEvent.STEP_FAILURE,
+                             context,
+-                            {"step_id": step.id, "error": step_err},
++                            {"step_id": step.id, "attempt": attempt, "error": step_err},
+                         )
++                        fast_fail = fast_fail or step.on_failure == OnFailureAction.FAIL_FAST or step.on_failure != OnFailureAction.CONTINUE
+ 
+-                # Fast-fail workflow if a step failed
+-                if level_failed:
++                # Fast-fail workflow if a step failed with fail_fast
++                if fast_fail:
+                     logger.warning(
+                         f"Level execution failed in run '{active_run_id}'. Aborting downstream steps."
+                     )
+@@ -222,6 +225,9 @@ class WorkflowRunner:
+                         for rem_step in rem_level:
+                             if context.get_step_state(rem_step.id) == StepState.PENDING:
+                                 context.set_step_state(rem_step.id, StepState.SKIPPED)
++                                await self.hook_registry.trigger(
++                                    LifecycleEvent.STEP_SKIPPED, context, {"step_id": rem_step.id}
++                                )
+                     break
+ 
+             # Aggregate final workflow state
+@@ -229,6 +235,7 @@ class WorkflowRunner:
+                 all_states = context.get_all_step_states()
+                 workflow_state = StateMachine.aggregate_workflow_state(all_states)
+ 
++
+         except Exception as exc:
+             logger.error(
+                 f"Workflow execution pipeline crashed for run '{active_run_id}': {exc}",
+@@ -267,9 +274,53 @@ class WorkflowRunner:
+             inputs=context.inputs.copy(),
+             outputs=context.get_all_step_outputs(),
+             step_states=context.get_all_step_states(),
++            step_attempts=context.step_attempts(),
+             error_message=error_message,
+         )
+ 
++    def is_run_active(self, run_id: str) -> bool:
++        """Check if a workflow execution run is currently registered as active."""
++        return run_id in self._active_runs
++
++    async def _execute_level(
++        self, steps: list[StepSpec], context: ExecutionContext, cancel_event: asyncio.Event
++    ) -> dict[str, tuple[StepState, dict[str, Any], str | None]]:
++        """Run independent steps concurrently, including their individual retry loops."""
++        results = await asyncio.gather(
++            *(self._execute_with_retry(step, context, cancel_event) for step in steps)
++        )
++        return dict(zip((step.id for step in steps), results))
++
++    async def _execute_with_retry(
++        self, step: StepSpec, context: ExecutionContext, cancel_event: asyncio.Event
++    ) -> tuple[StepState, dict[str, Any], str | None]:
++        """Execute a step until it succeeds, exhausts retries, or cancellation wins."""
++        policy = step.retry_policy
++        retries = policy.max_retries if policy and step.on_failure == OnFailureAction.RETRY else 0
++        controller = RetryController(RetrySchedule(policy, retries > 0), cancel_event)
++
++        async def execute_attempt() -> tuple[StepState, dict[str, Any], str | None]:
++            attempt = context.begin_attempt(step.id, retries)
++            await self.hook_registry.trigger(
++                LifecycleEvent.STEP_START, context, {"step_id": step.id, "attempt": attempt}
++            )
++            return await self.worker_pool.execute_step(step, context, cancel_event=cancel_event)
++
++
++        async def announce_retry(attempt: int, error: str | None, delay: float) -> None:
++            context.mark_retrying(step.id, error or "Step execution failed.", delay)
++            await self.hook_registry.trigger(
++                LifecycleEvent.STEP_RETRY,
++                context,
++                {"step_id": step.id, "attempt": attempt, "error": error, "delay_seconds": delay},
++            )
++
++        result = await controller.run(execute_attempt, announce_retry)
++        if result[0] == StepState.CANCELLED:
++            context.set_step_state(step.id, StepState.CANCELLED)
++        return result
++
++
+     def cancel_run(self, run_id: str) -> bool:
+         """Signal cancellation for an active workflow run ID.
+ 
+diff --git a/src/basalt/core/engine/state_machine.py b/src/basalt/core/engine/state_machine.py
+index 3c178d8..3c45977 100644
+--- a/src/basalt/core/engine/state_machine.py
++++ b/src/basalt/core/engine/state_machine.py
+@@ -108,6 +108,19 @@ class StepExecutionRecord(BaseModel):
+         if self.start_time and self.end_time:
+             self.duration_ms = (self.end_time - self.start_time).total_seconds() * 1000.0
+ 
++    def mark_retrying(self, error: str, delay_seconds: float = 0.0) -> None:
++        """Mark step as RETRYING after a recoverable execution failure."""
++        self.state = StepState.RETRYING
++        self.error_message = error
++
++    def mark_cancelled(self) -> None:
++        """Mark step as CANCELLED when execution or retry wait is aborted."""
++        self.state = StepState.CANCELLED
++        self.end_time = datetime.now(UTC)
++        if self.start_time and self.end_time:
++            self.duration_ms = (self.end_time - self.start_time).total_seconds() * 1000.0
++
++
+ 
+ class StateMachine:
+     """State machine governing transition rules for Workflows and Steps."""
+diff --git a/src/basalt/core/executors/pool.py b/src/basalt/core/executors/pool.py
+index 0f9c47b..3f17763 100644
+--- a/src/basalt/core/executors/pool.py
++++ b/src/basalt/core/executors/pool.py
+@@ -139,17 +139,27 @@ class WorkerPool:
+         self,
+         step: StepSpec,
+         context: ExecutionContext,
++        cancel_event: asyncio.Event | None = None,
+     ) -> tuple[StepState, dict[str, Any], str | None]:
+         """Execute a single step bounded by worker pool concurrency limits.
+ 
+         Args:
+             step: StepSpec AST model.
+             context: Active ExecutionContext.
++            cancel_event: Optional asyncio.Event to observe cancellation signals.
+ 
+         Returns:
+             Tuple of (StepState, output_payload_dict, error_message_or_none).
+         """
++        if cancel_event and cancel_event.is_set():
++            context.set_step_state(step.id, StepState.CANCELLED)
++            return StepState.CANCELLED, {}, "Execution cancelled by request"
++
+         async with self._semaphore:
++            if cancel_event and cancel_event.is_set():
++                context.set_step_state(step.id, StepState.CANCELLED)
++                return StepState.CANCELLED, {}, "Execution cancelled by request"
++
+             self._total_executed += 1
+             logger.debug(
+                 f"WorkerPool executing step '{step.id}' (executor: {step.executor_type.value})"
+@@ -158,13 +168,31 @@ class WorkerPool:
+                 executor = self.factory.get_executor(step.executor_type)
+                 context.set_step_state(step.id, StepState.RUNNING)
+ 
+-                output = await executor.execute(step, context)
++                if cancel_event:
++                    exec_task = asyncio.create_task(executor.execute(step, context))
++                    cancel_waiter = asyncio.create_task(cancel_event.wait())
++                    done, pending = await asyncio.wait(
++                        [exec_task, cancel_waiter], return_when=asyncio.FIRST_COMPLETED
++                    )
++                    if cancel_event.is_set():
++                        exec_task.cancel()
++                        context.set_step_state(step.id, StepState.CANCELLED)
++                        return StepState.CANCELLED, {}, "Execution cancelled by request"
++                    cancel_waiter.cancel()
++                    output = await exec_task
++                else:
++                    output = await executor.execute(step, context)
++
+                 context.set_step_state(step.id, StepState.COMPLETED)
+                 context.set_step_output(step.id, output)
+ 
+                 self._total_succeeded += 1
+                 return StepState.COMPLETED, output, None
+ 
++            except asyncio.CancelledError:
++                context.set_step_state(step.id, StepState.CANCELLED)
++                return StepState.CANCELLED, {}, "Execution cancelled by request"
++
+             except ExecutorTimeoutError as exc:
+                 logger.error(f"Step '{step.id}' execution timed out: {exc}")
+                 context.set_step_state(step.id, StepState.TIMEOUT)
+@@ -187,22 +215,24 @@ class WorkerPool:
+         self,
+         steps: list[StepSpec],
+         context: ExecutionContext,
++        cancel_event: asyncio.Event | None = None,
+     ) -> dict[str, tuple[StepState, dict[str, Any], str | None]]:
+-        """Execute multiple independent steps concurrently in parallel.
++        """Execute multiple steps in parallel subject to concurrency limits.
+ 
+         Args:
+-            steps: List of StepSpec AST models to execute.
++            steps: List of StepSpec AST models.
+             context: Active ExecutionContext.
++            cancel_event: Optional asyncio.Event for cancellation observation.
+ 
+         Returns:
+-            Dictionary mapping step_id to (StepState, output_dict, error_msg).
++            Dictionary mapping step_id to (StepState, output_payload, error_message).
+         """
+         if not steps:
+             return {}
+ 
+-        logger.debug(f"WorkerPool launching {len(steps)} parallel step tasks")
+-        tasks = [self.execute_step(step, context) for step in steps]
+-        results = await asyncio.gather(*tasks, return_exceptions=False)
++        logger.debug(f"WorkerPool executing {len(steps)} steps in parallel")
++        tasks = [self.execute_step(step, context, cancel_event=cancel_event) for step in steps]
++        results = await asyncio.gather(*tasks)
+ 
+         output_map: dict[str, tuple[StepState, dict[str, Any], str | None]] = {}
+         for step, res in zip(steps, results):
+diff --git a/src/basalt/core/resilience/retry.py b/src/basalt/core/resilience/retry.py
+index 575e706..e1b9e88 100644
+--- a/src/basalt/core/resilience/retry.py
++++ b/src/basalt/core/resilience/retry.py
+@@ -70,6 +70,7 @@ class RetryHandler:
+         step_id: str = "unnamed_step",
+         retryable_exceptions: tuple[type[Exception], ...] = (Exception,),
+         on_retry_callback: Callable[[int, Exception, float], None] | None = None,
++        cancel_event: asyncio.Event | None = None,
+     ) -> T:
+         """Execute async function coroutine with retry policy enforcement.
+ 
+@@ -79,6 +80,7 @@ class RetryHandler:
+             step_id: Step identifier for log messages.
+             retryable_exceptions: Tuple of Exception types eligible for retry.
+             on_retry_callback: Optional callback invoked on retry attempt failure.
++            cancel_event: Optional asyncio.Event for cancellation observation.
+ 
+         Returns:
+             Result object returned by successful invocation of coro_fn.
+@@ -95,6 +97,9 @@ class RetryHandler:
+         attempt_history: list[RetryAttemptRecord] = []
+ 
+         while attempt <= max_attempts:
++            if cancel_event and cancel_event.is_set():
++                raise asyncio.CancelledError(f"Step '{step_id}' cancelled before attempt {attempt}.")
++
+             try:
+                 if attempt > 1:
+                     logger.info(
+@@ -143,7 +148,16 @@ class RetryHandler:
+                         )
+ 
+                 logger.debug(f"Step '{step_id}' sleeping {delay:.3f}s before attempt {attempt + 1}")
+-                await asyncio.sleep(delay)
++                if cancel_event:
++                    if cancel_event.is_set():
++                        raise asyncio.CancelledError(f"Step '{step_id}' retry wait cancelled.")
++                    try:
++                        await asyncio.wait_for(cancel_event.wait(), timeout=delay)
++                        raise asyncio.CancelledError(f"Step '{step_id}' retry wait cancelled.")
++                    except asyncio.TimeoutError:
++                        pass
++                else:
++                    await asyncio.sleep(delay)
+                 attempt += 1
+ 
+             except Exception as non_retryable_exc:
+@@ -159,6 +173,82 @@ class RetryHandler:
+             attempt_history=attempt_history,
+         )
+ 
++    @staticmethod
++    async def execute_step_with_policy(
++        step_fn: Callable[[int], Awaitable[T]],
++        retry_policy: RetryPolicySpec | None = None,
++        step_id: str = "unnamed_step",
++        cancel_event: asyncio.Event | None = None,
++        on_attempt_start: Callable[[int], Any] | None = None,
++        on_attempt_failure: Callable[[int, Exception, float], Any] | None = None,
++    ) -> T:
++        """Execute step callable with attempt index tracking, hooks, and cancellation observation."""
++        policy = retry_policy or RetryPolicySpec()
++        max_attempts = 1 + max(0, policy.max_retries)
++        attempt = 1
++        last_exc: Exception | None = None
++        attempt_history: list[RetryAttemptRecord] = []
++
++        while attempt <= max_attempts:
++            if cancel_event and cancel_event.is_set():
++                raise asyncio.CancelledError(f"Execution cancelled before attempt {attempt}")
++
++            if on_attempt_start:
++                res = on_attempt_start(attempt)
++                if asyncio.iscoroutine(res):
++                    await res
++
++            try:
++                return await step_fn(attempt)
++            except Exception as exc:
++                last_exc = exc
++                if attempt >= max_attempts:
++                    break
++
++                delay = BackoffCalculator.calculate_delay(
++                    attempt=attempt,
++                    initial_delay_seconds=policy.initial_delay_seconds,
++                    max_delay_seconds=policy.max_delay_seconds,
++                    backoff_factor=policy.backoff_factor,
++                    strategy=BackoffStrategy.EXPONENTIAL,
++                    jitter=JitterStrategy.FULL if policy.jitter else JitterStrategy.NONE,
++                )
++
++                attempt_history.append(
++                    RetryAttemptRecord(
++                        attempt_number=attempt,
++                        delay_seconds=delay,
++                        exception_type=type(exc).__name__,
++                        exception_message=str(exc),
++                    )
++                )
++
++                if on_attempt_failure:
++                    cb_res = on_attempt_failure(attempt, exc, delay)
++                    if asyncio.iscoroutine(cb_res):
++                        await cb_res
++
++                if cancel_event:
++                    if cancel_event.is_set():
++                        raise asyncio.CancelledError("Cancelled during retry backoff")
++                    try:
++                        await asyncio.wait_for(cancel_event.wait(), timeout=delay)
++                        raise asyncio.CancelledError("Cancelled during retry backoff")
++                    except asyncio.TimeoutError:
++                        pass
++                else:
++                    await asyncio.sleep(delay)
++
++                attempt += 1
++
++        raise RetryExhaustedError(
++            step_id=step_id,
++            attempts=max_attempts,
++            last_exception=last_exc or RuntimeError("Unknown failure"),
++            attempt_history=attempt_history,
++        )
++
++
+     @staticmethod
+     def execute_sync_with_retry(
+         sync_fn: Callable[[], T],
+diff --git a/src/basalt/storage/repository.py b/src/basalt/storage/repository.py
+index ea7bc51..bb87b3b 100644
+--- a/src/basalt/storage/repository.py
++++ b/src/basalt/storage/repository.py
+@@ -197,11 +197,12 @@ class BasaltRepository:
+                         run_id=result.run_id,
+                         step_id=step_id,
+                         state=st_val,
+-                        attempt=1,
++                        attempt=result.step_attempts.get(step_id, 1),
+                         start_time=result.start_time,
+                         end_time=result.end_time,
+                         output_json=json_dumps(step_output) if step_output is not None else None,
+                     )
++
+                     session.add(step_model)
+             else:
+                 run_orm = ModelSerializer.run_result_to_orm(result)
+diff --git a/src/basalt/storage/serializers.py b/src/basalt/storage/serializers.py
+index 8fa6c49..68782a3 100644
+--- a/src/basalt/storage/serializers.py
++++ b/src/basalt/storage/serializers.py
+@@ -101,7 +101,7 @@ class ModelSerializer:
+                 run_id=result.run_id,
+                 step_id=step_id,
+                 state=state_val,
+-                attempt=1,
++                attempt=result.step_attempts.get(step_id, 1),
+                 start_time=result.start_time,
+                 end_time=result.end_time,
+                 output_json=json_dumps(step_output) if step_output is not None else None,
+@@ -117,9 +117,11 @@ class ModelSerializer:
+         outputs_dict = json_loads(model.outputs_json)
+ 
+         step_states_dict: dict[str, StepState] = {}
++        step_attempts_dict: dict[str, int] = {}
+         for step_run in model.step_runs:
+             try:
+                 step_states_dict[step_run.step_id] = StepState(step_run.state)
++                step_attempts_dict[step_run.step_id] = step_run.attempt
+             except ValueError:
+                 step_states_dict[step_run.step_id] = StepState.FAILED
+ 
+@@ -142,9 +144,11 @@ class ModelSerializer:
+             inputs=inputs_dict,
+             outputs=outputs_dict,
+             step_states=step_states_dict,
++            step_attempts=step_attempts_dict,
+             error_message=model.error_message,
+         )
+ 
++
+     @staticmethod
+     def orm_list_to_run_results(models: list[DAGRunModel]) -> list[WorkflowRunResult]:
+         """Convert list of DAGRunModel ORM entities to list of WorkflowRunResult objects."""
