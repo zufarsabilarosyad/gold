@@ -387,10 +387,10 @@ index 0000000..be111ef
 +    assert counter.calls == 2
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..8d496ff
+index 0000000..716aa0b
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,210 @@
+@@ -0,0 +1,272 @@
 +"""Additional contract coverage for the public ResultCache surface.
 +
 +This module validates detailed boundary contracts for ResultCache methods,
@@ -601,3 +601,65 @@ index 0000000..8d496ff
 +
 +    assert second_result.outputs["compute"] == first_result.outputs["compute"]
 +    assert second_result.step_states["compute"].name in ("COMPLETED", "SUCCESS")
++
++
++@pytest.mark.asyncio
++async def test_result_cache_empty_dictionary_handling() -> None:
++    """Verify that caching an empty dictionary works and behaves consistently."""
++    cache = ResultCache()
++    await cache.put("empty_payload", {})
++    retrieved = await cache.get("empty_payload")
++
++    assert retrieved == {}
++    assert isinstance(retrieved, dict)
++
++    stats = await cache.stats()
++    assert stats["entries"] == 1
++    assert stats["hits"] == 1
++
++
++@pytest.mark.asyncio
++async def test_result_cache_multiple_clears_idempotent() -> None:
++    """Verify that calling clear on an already empty cache returns zero."""
++    cache = ResultCache()
++    first_clear = await cache.clear()
++    assert first_clear == 0
++
++    await cache.put("temp_item", {"x": 10})
++    second_clear = await cache.clear()
++    assert second_clear == 1
++
++    third_clear = await cache.clear()
++    assert third_clear == 0
++
++
++@pytest.mark.asyncio
++async def test_result_cache_diverse_data_types() -> None:
++    """Verify that diverse JSON-compatible primitive types serialize correctly."""
++    cache = ResultCache()
++    payload = {
++        "string_val": "hello world",
++        "int_val": 42,
++        "float_val": 3.14159,
++        "bool_val": True,
++        "none_val": None,
++        "list_val": [1, "two", 3.0, False],
++        "nested_dict": {"sub": "data"},
++    }
++
++    await cache.put("diverse_key", payload)
++    result = await cache.get("diverse_key")
++
++    assert result == payload
++    assert result["nested_dict"] is not payload["nested_dict"]
++    assert result["list_val"] is not payload["list_val"]
++
++
++def test_memoization_policy_spec_equality_and_copies() -> None:
++    """Verify that MemoizationPolicySpec supports equality comparisons."""
++    policy_a = MemoizationPolicySpec(enabled=True, key="common", ttl_seconds=10.0, include_inputs=True)
++    policy_b = MemoizationPolicySpec(enabled=True, key="common", ttl_seconds=10.0, include_inputs=True)
++    policy_c = MemoizationPolicySpec(enabled=True, key="different", ttl_seconds=10.0, include_inputs=True)
++
++    assert policy_a == policy_b
++    assert policy_a != policy_c

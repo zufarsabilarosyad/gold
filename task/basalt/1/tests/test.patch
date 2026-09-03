@@ -438,7 +438,7 @@ new file mode 100644
 index 0000000..1111111
 --- /dev/null
 +++ b/tests/test_retry_policies.py
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,471 @@
 +"""Behavioral coverage for workflow step retry policies."""
 +
 +import asyncio
@@ -589,18 +589,22 @@ index 0000000..1111111
 +@pytest.mark.asyncio
 +async def test_cancellation_during_retry_wait_prevents_next_attempt():
 +    calls: list[int] = []
++    retry_started = asyncio.Event()
 +    retry_step("cancel", 10, calls)
 +    spec = retry_spec("cancel", 4)
 +    spec.retry_policy.initial_delay_seconds = 1.0
 +    spec.retry_policy.max_delay_seconds = 1.0
-+    runner = WorkflowRunner()
++    hooks = HookRegistry()
++
++    async def signal_retry(_, __, ___):
++        retry_started.set()
++
++    hooks.register(LifecycleEvent.STEP_RETRY, signal_retry)
++    runner = WorkflowRunner(hook_registry=hooks)
 +    task = asyncio.create_task(
 +        runner.run_async(DAGSpec(id="cancel", version="1", steps=[spec]), run_id="cancel-run")
 +    )
-+    for _ in range(1000):
-+        if calls:
-+            break
-+        await asyncio.sleep(0.001)
++    await asyncio.wait_for(retry_started.wait(), timeout=2.0)
 +    assert runner.cancel_run("cancel-run")
 +    result = await task
 +    assert result.state == WorkflowState.CANCELLED
@@ -705,11 +709,13 @@ index 0000000..1111111
 +@pytest.mark.asyncio
 +async def test_cancellation_during_executor_execution_prevents_retry():
 +    calls: list[int] = []
++    execution_started = asyncio.Event()
++    release_execution = asyncio.Event()
 +
-+    def slow_callable():
++    async def slow_callable():
 +        calls.append(1)
-+        import time
-+        time.sleep(0.3)
++        execution_started.set()
++        await release_execution.wait()
 +        raise RuntimeError("failed after delay")
 +
 +    register_python_callable("slow_step_fn", slow_callable)
@@ -726,12 +732,9 @@ index 0000000..1111111
 +    run_task = asyncio.create_task(
 +        runner.run_async(DAGSpec(id="cancel_exec_dag", steps=[step]), run_id="cancel_exec_run")
 +    )
-+    for _ in range(1000):
-+        if calls:
-+            break
-+        await asyncio.sleep(0.001)
-+
++    await asyncio.wait_for(execution_started.wait(), timeout=2.0)
 +    assert runner.cancel_run("cancel_exec_run")
++    release_execution.set()
 +    res = await run_task
 +
 +    assert res.state == WorkflowState.CANCELLED
