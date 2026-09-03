@@ -19,21 +19,21 @@ export RUN_LOG=/logs/verifier/run.log
 run_log() { echo "+ $*" >> "$RUN_LOG" 2>/dev/null; "$@" 2>&1 | tee -a "$RUN_LOG"; return "${PIPESTATUS[0]}"; }
 
 # >>> RUN TESTS (task-specific) <<<
-if [ -d "/app/.venv/bin" ]; then
-  export PATH="/app/.venv/bin:$PATH"
-fi
-export PYTHONPATH="/app/src:${PYTHONPATH:-}"
-
-git checkout -q 69686949e6162606cc54293dc2af217d63161577 -- tests/conftest.py 2>/dev/null || true
+# Keep checkout-controlled startup files out of the test processes and final
+# Python grader. Pytest adds src only after Python has started.
+unset PYTHONPATH
+export PYTHONSAFEPATH=1
 
 set +e
-PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto -o pythonpath=src --junitxml=/logs/verifier/base.xml" run_log python3 -m pytest -q \
+# Existing Basalt regression suite (pass-to-pass coverage).
+PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto -o pythonpath=src --junitxml=/logs/verifier/base.xml" run_log python3 -I -m pytest -q \
   tests/test_api_routes.py tests/test_cli_commands.py tests/test_context_evaluator.py \
   tests/test_dag_parser.py tests/test_dag_sorter.py tests/test_engine.py \
   tests/test_engine_integration.py tests/test_executors.py tests/test_resilience.py \
   tests/test_state_machine.py tests/test_storage_repository.py tests/test_triggers.py \
   tests/test_worker_pool.py
-PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto -o pythonpath=src --junitxml=/logs/verifier/new.xml" run_log python3 -m pytest -q \
+# New workflow retry and failure-policy behavior (fail-to-pass coverage).
+PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto -o pythonpath=src --junitxml=/logs/verifier/new.xml" run_log python3 -I -m pytest -q \
   tests/test_retry_policies.py tests/test_failure_continuation.py
 set -e
 # >>> END RUN TESTS <<<

@@ -132,10 +132,10 @@ def cmd_prepare(argv):
     base = load_config()["base_commit"]
     model_patch = ARTIFACTS_DIR / "model.patch"
     if model_patch.exists() and model_patch.stat().st_size > 0:
-        # Anti-cheat: model.patch must not touch tests/ or conftest.py
+        # Anti-cheat: model.patch must not touch tests/, conftest.py, or sitecustomize
         for p in patch_paths(read_patch(model_patch)):
-            if p.startswith("tests/") or p == "tests" or "conftest" in p:
-                log(f"ERROR: submitted model.patch touches forbidden test path: {p}")
+            if p.startswith("tests/") or p == "tests" or "conftest" in p or "customize" in p:
+                log(f"ERROR: submitted model.patch touches forbidden test/system path: {p}")
                 cmd_grade(["--apply-failed"])
                 sys.exit(0)
         reset_paths(patch_paths(read_patch(model_patch)), base)

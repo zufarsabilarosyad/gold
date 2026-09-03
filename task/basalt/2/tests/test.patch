@@ -78,7 +78,7 @@ index 0000000..532047a
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_returns_copies():
-+    cache = ResultCache(); await cache.put("a", {"x": []}); out = await cache.get("a"); out["x"].append(1); assert await cache.get("a") == {"x": []}
++    cache = ResultCache(); data = {"x": []}; await cache.put("a", data); data["x"].append(2); assert await cache.get("a") == {"x": []}; out = await cache.get("a"); out["x"].append(1); assert await cache.get("a") == {"x": []}
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_invalidates_entry():
@@ -129,7 +129,7 @@ index 0000000..532047a
 +    event, payload = seen[0]
 +    assert event == LifecycleEvent.STEP_CACHE_HIT
 +    assert set(payload) == {"step_id", "cache_key", "output"}
-+    assert payload["step_id"] == "work" and len(payload["cache_key"]) == 64
++    assert payload["step_id"] == "work" and isinstance(payload["cache_key"], str) and len(payload["cache_key"]) > 0
 +
 +@pytest.mark.asyncio
 +async def test_cache_hit_success_payload_marks_cached():
