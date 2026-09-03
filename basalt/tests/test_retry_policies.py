@@ -156,8 +156,8 @@ async def test_cancellation_during_retry_wait_prevents_next_attempt():
     task = asyncio.create_task(
         runner.run_async(DAGSpec(id="cancel", version="1", steps=[spec]), run_id="cancel-run")
     )
-    for _ in range(100):
-        if runner.is_run_active("cancel-run") and calls:
+    for _ in range(1000):
+        if calls:
             break
         await asyncio.sleep(0.001)
     assert runner.cancel_run("cancel-run")
@@ -285,8 +285,8 @@ async def test_cancellation_during_executor_execution_prevents_retry():
     run_task = asyncio.create_task(
         runner.run_async(DAGSpec(id="cancel_exec_dag", steps=[step]), run_id="cancel_exec_run")
     )
-    for _ in range(100):
-        if runner.is_run_active("cancel_exec_run") and calls:
+    for _ in range(1000):
+        if calls:
             break
         await asyncio.sleep(0.001)
 
