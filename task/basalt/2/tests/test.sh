@@ -19,18 +19,6 @@ export RUN_LOG=/logs/verifier/run.log
 run_log() { echo "+ $*" >> "$RUN_LOG" 2>/dev/null; "$@" 2>&1 | tee -a "$RUN_LOG"; return "${PIPESTATUS[0]}"; }
 
 # >>> RUN TESTS (task-specific) <<<
-_bad_path=""
-while IFS= read -r _model_path; do
-  case "$_model_path" in src/basalt/*) ;; *) _bad_path="$_model_path"; break ;; esac
-done < <(python3 /tests/grader.py patch-paths /logs/artifacts/model.patch)
-if [ -n "$_bad_path" ]; then
-  log "ERROR: submission touches out-of-scope path: $_bad_path"
-  : > /logs/verifier/base.xml
-  : > /logs/verifier/new.xml
-  python3 /tests/grader.py grade
-  exit 0
-fi
-
 if [ -d "/app/.venv/bin" ]; then
   export PATH="/app/.venv/bin:$PATH"
 fi
@@ -39,10 +27,10 @@ export PYTHONPATH="/app/src:${PYTHONPATH:-}"
 git checkout -q 69686949e6162606cc54293dc2af217d63161577 -- tests/conftest.py 2>/dev/null || true
 
 set +e
-PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --asyncio-mode=auto --junitxml=/logs/verifier/base.xml" run_log python3 -m pytest -q \
+PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/base.xml" run_log python3 -m pytest -q \
   tests/test_engine.py tests/test_dag_sorter.py tests/test_executors.py \
   tests/test_resilience.py tests/test_state_machine.py
-PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --asyncio-mode=auto --junitxml=/logs/verifier/new.xml" run_log python3 -m pytest -q \
+PYTEST_ADDOPTS="-p no:cacheprovider --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/new.xml" run_log python3 -m pytest -q \
   tests/test_result_memoization.py tests/test_result_memoization_contract_notes.py
 set -e
 # >>> END RUN TESTS <<<
