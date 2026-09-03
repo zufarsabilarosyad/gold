@@ -1,0 +1,643 @@
+diff --git a/src/basalt/core/dag/ast.py b/src/basalt/core/dag/ast.py
+index 8a3ce1f..f4e9232 100644
+--- a/src/basalt/core/dag/ast.py
++++ b/src/basalt/core/dag/ast.py
+@@ -69,6 +69,15 @@ class RetryPolicySpec(BaseModel):
+     )
+ 
+ 
++class MemoizationPolicySpec(BaseModel):
++    """Controls whether a successful step result may be reused."""
++
++    enabled: bool = Field(default=False, description="Reuse a matching successful result.")
++    key: str | None = Field(default=None, description="Optional stable cache namespace.")
++    ttl_seconds: float | None = Field(default=None, gt=0.0, description="Optional cache lifetime.")
++    include_inputs: bool = Field(default=True, description="Include workflow inputs in the key.")
++
++
+ class StepSpec(BaseModel):
+     """Specification schema for an individual workflow task step."""
+ 
+@@ -187,6 +196,10 @@ class StepSpec(BaseModel):
+         default=OnFailureAction.FAIL_FAST,
+         description="Action to take when step execution fails.",
+     )
++    memoization: MemoizationPolicySpec = Field(
++        default_factory=MemoizationPolicySpec,
++        description="Step result cache policy.",
++    )
+ 
+     @model_validator(mode="after")
+     def sync_aliases(self) -> "StepSpec":
+diff --git a/src/basalt/core/engine/hooks.py b/src/basalt/core/engine/hooks.py
+index 0861b14..794f99f 100644
+--- a/src/basalt/core/engine/hooks.py
++++ b/src/basalt/core/engine/hooks.py
+@@ -28,6 +28,7 @@ class LifecycleEvent(str, Enum):
+     STEP_SUCCESS = "step_success"
+     STEP_FAILURE = "step_failure"
+     STEP_RETRY = "step_retry"
++    STEP_CACHE_HIT = "step_cache_hit"
+     STEP_SKIPPED = "step_skipped"
+ 
+ 
+@@ -157,6 +158,11 @@ class HookRegistry:
+         self.register(LifecycleEvent.STEP_RETRY, callback)
+         return callback
+ 
++    def on_step_cache_hit(self, callback: HookCallback) -> HookCallback:
++        """Register a callback invoked when a memoized result is reused."""
++        self.register(LifecycleEvent.STEP_CACHE_HIT, callback)
++        return callback
++
+     def on_step_skipped(self, callback: HookCallback) -> HookCallback:
+         """Decorator helper for registering step_skipped hook."""
+         self.register(LifecycleEvent.STEP_SKIPPED, callback)
+diff --git a/src/basalt/core/engine/memoization.py b/src/basalt/core/engine/memoization.py
+new file mode 100644
+index 0000000..db9f03d
+--- /dev/null
++++ b/src/basalt/core/engine/memoization.py
+@@ -0,0 +1,152 @@
++"""Small, concurrency-safe result cache used by :class:`WorkflowRunner`.
++
++The cache deliberately stores only JSON-like successful executor outputs.  It is
++process-local: callers that need a shared cache can pass one ResultCache to
++multiple runners.  Keeping the key builder here makes cache behaviour useful
++outside the runner too, and makes it easy to inspect or invalidate entries in
++long-running applications.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import copy
++import hashlib
++import json
++import math
++import time
++from dataclasses import dataclass
++from typing import Any
++
++from basalt.core.dag.ast import StepSpec
++from basalt.core.engine.context import ExecutionContext
++
++
++def _normalise(value: Any) -> Any:
++    """Return a deterministic, JSON-compatible representation of *value*.
++
++    Executor definitions occasionally contain enums, sets, paths, or custom
++    values.  A cache must never fail a workflow merely because such a value is
++    present, so unknown objects are represented by their string form.
++    """
++    if value is None or isinstance(value, (str, int, bool)):
++        return value
++    if isinstance(value, float):
++        return value if math.isfinite(value) else repr(value)
++    if isinstance(value, dict):
++        return {str(k): _normalise(v) for k, v in sorted(value.items(), key=lambda i: str(i[0]))}
++    if isinstance(value, (list, tuple)):
++        return [_normalise(item) for item in value]
++    if isinstance(value, set):
++        return sorted((_normalise(item) for item in value), key=repr)
++    raw = getattr(value, "value", None)
++    if raw is not None:
++        return _normalise(raw)
++    return str(value)
++
++
++def _step_definition(step: StepSpec) -> dict[str, Any]:
++    """Select execution-affecting fields while omitting cache policy itself."""
++    data = step.model_dump(mode="json", by_alias=True)
++    data.pop("memoization", None)
++    # Display-only text must not make the same computation miss the cache.
++    data.pop("name", None)
++    data.pop("description", None)
++    return _normalise(data)
++
++
++def make_cache_key(step: StepSpec, context: ExecutionContext) -> str:
++    """Build a stable SHA-256 key from the work definition and its inputs."""
++    policy = step.memoization
++    payload: dict[str, Any] = {
++        "namespace": policy.key or f"{context.dag_id}:{step.id}",
++        "step": _step_definition(step),
++        "upstream_outputs": {
++            parent: context.get_step_output(parent) for parent in sorted(step.depends_on)
++        },
++    }
++    if policy.include_inputs:
++        payload["inputs"] = _normalise(context.inputs)
++    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
++    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
++
++
++@dataclass(frozen=True)
++class CacheEntry:
++    """Immutable cache snapshot returned to callers."""
++
++    key: str
++    output: dict[str, Any]
++    created_at: float
++    expires_at: float | None
++
++    @property
++    def expired(self) -> bool:
++        return self.expires_at is not None and time.monotonic() >= self.expires_at
++
++
++class ResultCache:
++    """Asynchronous in-memory cache for completed step outputs.
++
++    Entries are copied at both boundaries so a consumer cannot mutate a cached
++    value seen by another workflow.  The async lock also makes cache access
++    safe when one runner processes several workflow runs concurrently.
++    """
++
++    def __init__(self) -> None:
++        self._entries: dict[str, CacheEntry] = {}
++        self._lock = asyncio.Lock()
++        self._hits = 0
++        self._misses = 0
++
++    async def get(self, key: str) -> dict[str, Any] | None:
++        """Get a live entry, removing expired entries eagerly."""
++        async with self._lock:
++            entry = self._entries.get(key)
++            if entry is None:
++                self._misses += 1
++                return None
++            if entry.expired:
++                del self._entries[key]
++                self._misses += 1
++                return None
++            self._hits += 1
++            return copy.deepcopy(entry.output)
++
++    async def put(self, key: str, output: dict[str, Any], ttl_seconds: float | None = None) -> CacheEntry:
++        """Store an output and return the stored entry metadata."""
++        now = time.monotonic()
++        entry = CacheEntry(
++            key=key,
++            output=copy.deepcopy(output or {}),
++            created_at=now,
++            expires_at=(now + ttl_seconds) if ttl_seconds is not None else None,
++        )
++        async with self._lock:
++            self._entries[key] = entry
++        return entry
++
++    async def invalidate(self, key: str) -> bool:
++        """Delete one exact key and report whether it existed."""
++        async with self._lock:
++            return self._entries.pop(key, None) is not None
++
++    async def clear(self) -> int:
++        """Delete all cached results and return the number removed."""
++        async with self._lock:
++            count = len(self._entries)
++            self._entries.clear()
++            return count
++
++    async def keys(self) -> list[str]:
++        """Return live cache keys without exposing internal entries."""
++        async with self._lock:
++            expired = [key for key, item in self._entries.items() if item.expired]
++            for key in expired:
++                del self._entries[key]
++            return list(self._entries)
++
++    async def stats(self) -> dict[str, int]:
++        """Return simple observability counters for application status APIs."""
++        async with self._lock:
++            return {"entries": len(self._entries), "hits": self._hits, "misses": self._misses}
+diff --git a/src/basalt/core/engine/memoization_admin.py b/src/basalt/core/engine/memoization_admin.py
+new file mode 100644
+index 0000000..167b02e
+--- /dev/null
++++ b/src/basalt/core/engine/memoization_admin.py
+@@ -0,0 +1,194 @@
++"""Administration helpers for observing and managing result caches.
++
++These helpers are intentionally separate from execution.  Web applications,
++CLIs, and operators can use them to inspect cache state, organize entries by a
++human-readable namespace, and safely perform bulk invalidation without
++reaching into :class:`ResultCache` private attributes.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any
++
++from basalt.core.engine.memoization import ResultCache
++
++
++@dataclass(frozen=True)
++class CacheSummary:
++    """A serializable snapshot suitable for a status response."""
++
++    entries: int
++    hits: int
++    misses: int
++    hit_rate: float
++    keys: tuple[str, ...]
++
++    def as_dict(self) -> dict[str, Any]:
++        """Return primitive values for JSON encoders and CLI formatters."""
++        return {"entries": self.entries, "hits": self.hits, "misses": self.misses,
++                "hit_rate": self.hit_rate, "keys": list(self.keys)}
++
++
++class CacheAdministration:
++    """High-level, non-execution operations over a :class:`ResultCache`.
++
++    Cache hashes are opaque by design.  Applications that need bulk operations
++    should record the returned keys when they create entries, then use this
++    object to invalidate the exact keys.  Prefix filtering is still useful for
++    integrations which use a key adapter that deliberately prefixes keys.
++    """
++
++    def __init__(self, cache: ResultCache) -> None:
++        self.cache = cache
++
++    async def summary(self) -> CacheSummary:
++        """Return a coherent snapshot after expiring stale entries."""
++        keys = tuple(sorted(await self.cache.keys()))
++        stats = await self.cache.stats()
++        total = stats["hits"] + stats["misses"]
++        return CacheSummary(entries=len(keys), hits=stats["hits"], misses=stats["misses"],
++                            hit_rate=stats["hits"] / total if total else 0.0, keys=keys)
++
++    async def contains(self, key: str) -> bool:
++        """Return whether a live exact key exists without retaining its output."""
++        value = await self.cache.get(key)
++        return value is not None
++
++    async def invalidate_many(self, keys: list[str] | tuple[str, ...] | set[str]) -> int:
++        """Invalidate unique keys and return the number actually removed."""
++        removed = 0
++        for key in dict.fromkeys(str(item) for item in keys):
++            if await self.cache.invalidate(key):
++                removed += 1
++        return removed
++
++    async def invalidate_prefix(self, prefix: str) -> int:
++        """Remove every live key beginning with *prefix*."""
++        return await self.invalidate_many([key for key in await self.cache.keys() if key.startswith(prefix)])
++
++    async def reset_statistics(self) -> CacheSummary:
++        """Clear values and return the empty cache summary.
++
++        ResultCache counters intentionally describe process lifetime; clearing
++        values does not erase usage history.  This method is named for the
++        common operational action of resetting the cache working set.
++        """
++        await self.cache.clear()
++        return await self.summary()
++
++
++class CacheNamespace:
++    """A tiny key adapter for clients that want readable cache grouping.
++
++    It does not replace the runner's cryptographic identity.  Instead, clients
++    can use it when interacting with `ResultCache` directly for companion
++    values such as precomputed metadata or manually memoized calculations.
++    """
++
++    def __init__(self, name: str) -> None:
++        clean = str(name).strip().strip(":")
++        if not clean:
++            raise ValueError("cache namespace must not be empty")
++        self.name = clean
++
++    def key(self, name: str) -> str:
++        """Build a canonical namespaced key."""
++        clean = str(name).strip().strip(":")
++        if not clean:
++            raise ValueError("cache key name must not be empty")
++        return f"{self.name}:{clean}"
++
++    async def get(self, cache: ResultCache, name: str) -> dict[str, Any] | None:
++        """Fetch one namespaced value."""
++        return await cache.get(self.key(name))
++
++    async def put(self, cache: ResultCache, name: str, output: dict[str, Any], ttl_seconds: float | None = None) -> None:
++        """Store one namespaced value."""
++        await cache.put(self.key(name), output, ttl_seconds)
++
++    async def invalidate(self, cache: ResultCache, name: str) -> bool:
++        """Delete one namespaced value."""
++        return await cache.invalidate(self.key(name))
++
++    async def clear(self, cache: ResultCache) -> int:
++        """Delete all values belonging to this namespace."""
++        return await CacheAdministration(cache).invalidate_prefix(f"{self.name}:")
++
++
++@dataclass(frozen=True)
++class CacheHealth:
++    """Operational interpretation of a cache's current statistics.
++
++    The runner does not require health classification to execute workflows;
++    this value object exists for status endpoints and monitoring integrations.
++    Thresholds are supplied by callers because acceptable hit rates differ
++    significantly between workloads.
++    """
++
++    healthy: bool
++    hit_rate: float
++    minimum_hit_rate: float
++    observations: int
++    reason: str
++
++    def as_dict(self) -> dict[str, Any]:
++        """Convert the assessment to a JSON-ready response body."""
++        return {
++            "healthy": self.healthy,
++            "hit_rate": self.hit_rate,
++            "minimum_hit_rate": self.minimum_hit_rate,
++            "observations": self.observations,
++            "reason": self.reason,
++        }
++
++
++async def assess_cache_health(
++    cache: ResultCache,
++    minimum_hit_rate: float = 0.0,
++    minimum_observations: int = 1,
++) -> CacheHealth:
++    """Assess cache effectiveness using explicit caller-selected thresholds.
++
++    An unused cache is reported as healthy until enough observations exist.
++    This avoids false alarms immediately after process startup. Once the
++    observation threshold is met, the calculated hit rate must meet or exceed
++    ``minimum_hit_rate``.
++
++    Args:
++        cache: Cache whose lifetime counters should be inspected.
++        minimum_hit_rate: Inclusive expected ratio in the range zero to one.
++        minimum_observations: Number of lookups needed before judging health.
++
++    Returns:
++        An immutable :class:`CacheHealth` assessment.
++
++    Raises:
++        ValueError: If either threshold is outside its supported range.
++    """
++    if not 0.0 <= minimum_hit_rate <= 1.0:
++        raise ValueError("minimum hit rate must be between zero and one")
++    if minimum_observations < 0:
++        raise ValueError("minimum observations must not be negative")
++
++    stats = await cache.stats()
++    observations = stats["hits"] + stats["misses"]
++    hit_rate = stats["hits"] / observations if observations else 0.0
++
++    if observations < minimum_observations:
++        return CacheHealth(
++            healthy=True,
++            hit_rate=hit_rate,
++            minimum_hit_rate=minimum_hit_rate,
++            observations=observations,
++            reason="insufficient observations",
++        )
++
++    healthy = hit_rate >= minimum_hit_rate
++    return CacheHealth(
++        healthy=healthy,
++        hit_rate=hit_rate,
++        minimum_hit_rate=minimum_hit_rate,
++        observations=observations,
++        reason="hit rate meets threshold" if healthy else "hit rate below threshold",
++    )
+diff --git a/src/basalt/core/engine/memoization_keys.py b/src/basalt/core/engine/memoization_keys.py
+new file mode 100644
+index 0000000..e05071a
+--- /dev/null
++++ b/src/basalt/core/engine/memoization_keys.py
+@@ -0,0 +1,47 @@
++"""Convenience functions for working with opaque memoization keys."""
++
++from __future__ import annotations
++
++import re
++
++
++_DIGEST = re.compile(r"^[0-9a-f]{64}$")
++
++
++def is_cache_key(value: str) -> bool:
++    """Return true only for runner-generated SHA-256 cache identities."""
++    # Hashes are lowercase hexadecimal by construction, but callers may not be.
++    return bool(_DIGEST.fullmatch(str(value).lower()))
++
++
++def abbreviate_cache_key(value: str, length: int = 12) -> str:
++    """Return a safe short display form for logs and status tables."""
++    if length < 4:
++        raise ValueError("cache key abbreviation length must be at least four")
++    text = str(value)
++    return text if len(text) <= length else f"{text[:length]}…"
++
++
++def cache_key_parts(value: str, width: int = 8) -> tuple[str, ...]:
++    """Split an opaque key into equal display chunks."""
++    if width <= 0:
++        raise ValueError("cache key part width must be positive")
++    text = str(value)
++    return tuple(text[index:index + width] for index in range(0, len(text), width))
++
++
++def compare_cache_keys(left: str, right: str) -> str:
++    """Describe whether two identities match without exposing their origin."""
++    if left == right:
++        return "same"
++    if not left or not right:
++        return "missing"
++    return "different"
++
++
++def require_cache_key(value: str) -> str:
++    """Validate and normalize a cache identity supplied to an admin API."""
++    text = str(value).lower()
++    if not is_cache_key(text):
++        raise ValueError("cache key must be a lowercase SHA-256 digest")
++    return text
+diff --git a/src/basalt/core/engine/memoization_serialization.py b/src/basalt/core/engine/memoization_serialization.py
+new file mode 100644
+index 0000000..736b6db
+--- /dev/null
++++ b/src/basalt/core/engine/memoization_serialization.py
+@@ -0,0 +1,100 @@
++"""Portable serialization utilities for memoized result values.
++
++The in-memory cache stores dictionaries directly, but cache clients often need
++to log, transmit, or persist a value.  This module gives those clients a small
++strict codec with a versioned envelope.  It is deliberately not wired into the
++runner: adopting durable storage remains an application decision.
++"""
++
++from __future__ import annotations
++
++import base64
++import hashlib
++import json
++from dataclasses import dataclass
++from typing import Any
++
++
++CODEC_VERSION = 1
++
++
++class MemoizationCodecError(ValueError):
++    """Raised when a serialized cache envelope is malformed or corrupted."""
++
++
++def _canonical(value: Any) -> bytes:
++    """Encode JSON with stable whitespace and key ordering."""
++    try:
++        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
++                          allow_nan=False).encode("utf-8")
++    except (TypeError, ValueError) as exc:
++        raise MemoizationCodecError("memoized output must be JSON serializable") from exc
++
++
++@dataclass(frozen=True)
++class SerializedResult:
++    """Versioned representation of a memoized output."""
++
++    version: int
++    digest: str
++    payload: str
++
++    @classmethod
++    def from_output(cls, output: dict[str, Any]) -> "SerializedResult":
++        """Create a checksummed envelope from an output mapping."""
++        raw = _canonical(output)
++        return cls(CODEC_VERSION, hashlib.sha256(raw).hexdigest(),
++                   base64.b64encode(raw).decode("ascii"))
++
++    def output(self) -> dict[str, Any]:
++        """Decode and validate this envelope's output mapping."""
++        if self.version != CODEC_VERSION:
++            raise MemoizationCodecError(f"unsupported memoization codec version: {self.version}")
++        try:
++            raw = base64.b64decode(self.payload.encode("ascii"), validate=True)
++        except Exception as exc:
++            raise MemoizationCodecError("memoized payload is not valid base64") from exc
++        digest = hashlib.sha256(raw).hexdigest()
++        if digest != self.digest:
++            raise MemoizationCodecError("memoized payload checksum does not match")
++        try:
++            value = json.loads(raw.decode("utf-8"))
++        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
++            raise MemoizationCodecError("memoized payload is not valid JSON") from exc
++        if not isinstance(value, dict):
++            raise MemoizationCodecError("memoized payload must decode to an object")
++        return value
++
++    def as_dict(self) -> dict[str, Any]:
++        """Return the envelope as JSON-ready primitive fields."""
++        return {"version": self.version, "digest": self.digest, "payload": self.payload}
++
++    @classmethod
++    def parse(cls, value: dict[str, Any]) -> "SerializedResult":
++        """Validate a JSON-ready envelope before decoding it."""
++        if not isinstance(value, dict):
++            raise MemoizationCodecError("memoization envelope must be an object")
++        try:
++            version = int(value["version"])
++            digest = str(value["digest"])
++            payload = str(value["payload"])
++        except (KeyError, TypeError, ValueError) as exc:
++            raise MemoizationCodecError("memoization envelope is missing required fields") from exc
++        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest.lower()):
++            raise MemoizationCodecError("memoization envelope has an invalid digest")
++        return cls(version, digest, payload)
++
++
++def dump_output(output: dict[str, Any]) -> str:
++    """Serialize an output to a compact JSON envelope string."""
++    return json.dumps(SerializedResult.from_output(output).as_dict(), sort_keys=True,
++                      separators=(",", ":"))
++
++
++def load_output(text: str) -> dict[str, Any]:
++    """Deserialize a compact JSON envelope string back to an output mapping."""
++    try:
++        envelope = json.loads(text)
++    except json.JSONDecodeError as exc:
++        raise MemoizationCodecError("memoization envelope text is not JSON") from exc
++    return SerializedResult.parse(envelope).output()
+diff --git a/src/basalt/core/engine/runner.py b/src/basalt/core/engine/runner.py
+index e0857a4..9879f67 100644
+--- a/src/basalt/core/engine/runner.py
++++ b/src/basalt/core/engine/runner.py
+@@ -17,6 +17,7 @@ from basalt.core.dag.validator import DAGValidator
+ from basalt.core.engine.context import ExecutionContext
+ from basalt.core.engine.evaluator import ExpressionEvaluator
+ from basalt.core.engine.hooks import HookRegistry, LifecycleEvent, get_hook_registry
++from basalt.core.engine.memoization import ResultCache, make_cache_key
+ from basalt.core.engine.state_machine import StateMachine, StepState, WorkflowState
+ from basalt.core.executors.pool import WorkerPool
+ from basalt.utils.crypto import generate_run_id
+@@ -55,9 +56,11 @@ class WorkflowRunner:
+         self,
+         worker_pool: WorkerPool | None = None,
+         hook_registry: HookRegistry | None = None,
++        result_cache: ResultCache | None = None,
+     ) -> None:
+         self.worker_pool = worker_pool or WorkerPool()
+         self.hook_registry = hook_registry or get_hook_registry()
++        self.result_cache = result_cache or ResultCache()
+         self._active_runs: dict[str, asyncio.Event] = {}
+ 
+     def get_active_run_ids(self) -> list[str]:
+@@ -151,6 +154,7 @@ class WorkflowRunner:
+ 
+                 # Separate steps to execute vs steps to skip due to conditions/upstream failures
+                 runnable_steps: list[StepSpec] = []
++                cache_keys: dict[str, str] = {}
+ 
+                 for step in level_steps:
+                     # Check upstream dependency states
+@@ -175,6 +179,22 @@ class WorkflowRunner:
+                             )
+                             continue
+ 
++                    if step.memoization.enabled:
++                        key = make_cache_key(step, context)
++                        cached = await self.result_cache.get(key)
++                        if cached is not None:
++                            context.set_step_state(step.id, StepState.COMPLETED)
++                            context.set_step_output(step.id, cached)
++                            await self.hook_registry.trigger(
++                                LifecycleEvent.STEP_CACHE_HIT, context,
++                                {"step_id": step.id, "cache_key": key, "output": cached},
++                            )
++                            await self.hook_registry.trigger(
++                                LifecycleEvent.STEP_SUCCESS, context,
++                                {"step_id": step.id, "output": cached, "cached": True},
++                            )
++                            continue
++                        cache_keys[step.id] = key
+                     runnable_steps.append(step)
+ 
+                 if not runnable_steps:
+@@ -198,10 +218,14 @@ class WorkflowRunner:
+                         step.id, (StepState.FAILED, {}, "No result")
+                     )
+                     if state == StepState.COMPLETED:
++                        if step.id in cache_keys:
++                            await self.result_cache.put(
++                                cache_keys[step.id], output, step.memoization.ttl_seconds
++                            )
+                         await self.hook_registry.trigger(
+                             LifecycleEvent.STEP_SUCCESS,
+                             context,
+-                            {"step_id": step.id, "output": output},
++                            {"step_id": step.id, "output": output, "cached": False},
+                         )
+                     else:
+                         level_failed = True

@@ -1,0 +1,7 @@
+Workflows often repeat expensive, deterministic steps with the same inputs. Basalt should let an individual step opt in to result memoization, so a later equivalent run can reuse its successful output without invoking its executor again. Add a `memoization` step configuration with `enabled`, an optional cache `key`, optional positive `ttl_seconds`, and `include_inputs` (defaulting to true). Memoization remains off by default.
+
+The cache identity must distinguish different executable step definitions, workflow inputs when `include_inputs` is enabled, and outputs from declared dependencies. An explicit key provides a stable namespace; changing it must not reuse a previous entry. On a hit, populate the normal step output and completed state so dependent steps work exactly as they would after execution. Emit `STEP_CACHE_HIT` followed by the usual successful-step lifecycle notification; its payload must identify the step, cache key, output, and whether the success was cached. Do not cache failed results. Expired entries must execute again.
+
+Expose a reusable in-memory result cache that applications can share between runners. It must support looking up and storing results, targeted invalidation, clearing, key listing, and hit/miss/entry statistics. Cache reads and writes must not leak mutable output objects between workflows.
+
+IMPORTANT: Please work on this in a new branch from main and commit everything when you are done.
