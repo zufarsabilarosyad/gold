@@ -1,9 +1,9 @@
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..c9531f6
+index 0000000..0a4fa6b
 --- /dev/null
 +++ b/tests/test_result_memoization.py
-@@ -0,0 +1,588 @@
+@@ -0,0 +1,683 @@
 +"""Contract coverage for reusable workflow step results.
 +
 +This suite verifies that deterministic workflow steps can safely reuse
@@ -384,6 +384,59 @@ index 0000000..c9531f6
 +
 +
 +@pytest.mark.asyncio
++async def test_varying_ttl_retains_cache_hit_as_policy_excluded_from_step_definition() -> None:
++    """Verify that memoization policy itself (like TTL) is excluded from step cache identity."""
++    runner_instance, counter = create_test_runner()
++
++    policy1 = MemoizationPolicySpec(enabled=True, key="shared_ttl_test", ttl_seconds=50.0)
++    dag1 = DAGSpec(
++        id="dag_ttl1",
++        steps=[StepSpec(id="work", executor_type=ExecutorType.CUSTOM, memoization=policy1)],
++    )
++
++    policy2 = MemoizationPolicySpec(enabled=True, key="shared_ttl_test", ttl_seconds=100.0)
++    dag2 = DAGSpec(
++        id="dag_ttl2",
++        steps=[StepSpec(id="work", executor_type=ExecutorType.CUSTOM, memoization=policy2)],
++    )
++
++    # First run populates the cache with ttl_seconds=50.0
++    await runner_instance.run_async(dag1)
++    assert counter.calls == 1
++
++    # Second run with different ttl_seconds must still hit the active cache entry
++    await runner_instance.run_async(dag2)
++    assert counter.calls == 1
++
++    # Also verify with automatic identity (key=None) within the same DAG
++    dag_auto1 = DAGSpec(
++        id="dag_auto_ttl",
++        steps=[
++            StepSpec(
++                id="work",
++                executor_type=ExecutorType.CUSTOM,
++                memoization=MemoizationPolicySpec(enabled=True, ttl_seconds=40.0),
++            )
++        ],
++    )
++    dag_auto2 = DAGSpec(
++        id="dag_auto_ttl",
++        steps=[
++            StepSpec(
++                id="work",
++                executor_type=ExecutorType.CUSTOM,
++                memoization=MemoizationPolicySpec(enabled=True, ttl_seconds=80.0),
++            )
++        ],
++    )
++    await runner_instance.run_async(dag_auto1)
++    assert counter.calls == 2
++
++    await runner_instance.run_async(dag_auto2)
++    assert counter.calls == 2
++
++
++@pytest.mark.asyncio
 +async def test_cache_hit_emits_lifecycle_event() -> None:
 +    """Verify that cache hit triggers STEP_CACHE_HIT with the required payload fields."""
 +    captured_events: list[tuple[Any, dict[str, Any]]] = []
@@ -413,7 +466,11 @@ index 0000000..c9531f6
 +    """Verify that STEP_SUCCESS payload reports cached: True on hit and False on execution."""
 +    captured_events: list[tuple[Any, dict[str, Any]]] = []
 +    hooks = HookRegistry()
-+    for event_type in (LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS):
++    for event_type in (
++        LifecycleEvent.STEP_START,
++        LifecycleEvent.STEP_CACHE_HIT,
++        LifecycleEvent.STEP_SUCCESS,
++    ):
 +        hooks.register(
 +            event_type,
 +            lambda event, context, payload: captured_events.append((event, payload)),
@@ -423,6 +480,8 @@ index 0000000..c9531f6
 +    dag_spec = build_test_dag()
 +
 +    await runner_instance.run_async(dag_spec)
++    executed_event_types = [ev for ev, _ in captured_events]
++    assert LifecycleEvent.STEP_START in executed_event_types
 +    executed_payload = captured_events[-1][1]
 +    assert set(executed_payload.keys()) == {"step_id", "output", "cached"}
 +    assert executed_payload["step_id"] == "work"
@@ -433,6 +492,7 @@ index 0000000..c9531f6
 +    await runner_instance.run_async(dag_spec)
 +
 +    dispatched_events = [ev for ev, _ in captured_events]
++    assert LifecycleEvent.STEP_START not in dispatched_events
 +    assert dispatched_events == [
 +        LifecycleEvent.STEP_CACHE_HIT,
 +        LifecycleEvent.STEP_SUCCESS,
@@ -447,6 +507,41 @@ index 0000000..c9531f6
 +    assert success_payload["step_id"] == "work"
 +    assert success_payload["output"] == {"call": 1, "input": None, "step_id": "work"}
 +    assert success_payload["cached"] is True
++
++
++@pytest.mark.asyncio
++async def test_cache_hit_skips_step_start_lifecycle_event() -> None:
++    """Verify that a cache hit skips invoking the step executor and does not emit STEP_START."""
++    event_counts: dict[LifecycleEvent, int] = {
++        LifecycleEvent.STEP_START: 0,
++        LifecycleEvent.STEP_CACHE_HIT: 0,
++        LifecycleEvent.STEP_SUCCESS: 0,
++    }
++    hooks = HookRegistry()
++    for event_type in event_counts:
++        hooks.register(
++            event_type,
++            lambda event, context, payload, et=event_type: event_counts.__setitem__(
++                et, event_counts[et] + 1
++            ),
++        )
++
++    runner_instance, counter = create_test_runner(hooks=hooks)
++    dag_spec = build_test_dag()
++
++    # Initial execution: cache miss, STEP_START is emitted
++    await runner_instance.run_async(dag_spec)
++    assert counter.calls == 1
++    assert event_counts[LifecycleEvent.STEP_START] == 1
++    assert event_counts[LifecycleEvent.STEP_CACHE_HIT] == 0
++    assert event_counts[LifecycleEvent.STEP_SUCCESS] == 1
++
++    # Second execution: cache hit, STEP_START must be skipped and not emitted
++    await runner_instance.run_async(dag_spec)
++    assert counter.calls == 1
++    assert event_counts[LifecycleEvent.STEP_START] == 1
++    assert event_counts[LifecycleEvent.STEP_CACHE_HIT] == 1
++    assert event_counts[LifecycleEvent.STEP_SUCCESS] == 2
 +
 +
 +@pytest.mark.asyncio
