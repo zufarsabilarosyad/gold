@@ -1,7 +1,19 @@
-Workflows often repeat expensive, deterministic steps with the same inputs. Basalt should let an individual step opt in to result memoization, so a later equivalent run can reuse its successful output without invoking its executor again. In `basalt.core.dag.ast`, expose `MemoizationPolicySpec` and add a `memoization: MemoizationPolicySpec` field to `StepSpec`. Its fields are `enabled: bool = False`, `key: str | None = None`, `ttl_seconds: float | None = None`, and `include_inputs: bool = True`; a supplied TTL must be positive.
+Basalt should let deterministic workflow steps opt in to result memoization to reuse successful outputs without re-executing.
 
-The cache identity must distinguish different executable step definitions (such as executor type, command, or callable name, while ignoring display-only metadata), workflow inputs when `include_inputs` is enabled, and outputs from declared dependencies. When `key` is `None` (the default), cache identity automatically derives from the workflow and step definition; an explicit `key` provides a stable namespace, and changing it must not reuse a previous entry. On a hit, populate the normal step output and completed state so dependent steps work normally. Add `STEP_CACHE_HIT` (`"step_cache_hit"`) to `LifecycleEvent`. Emit it with exactly `step_id`, `cache_key`, and `output`, immediately followed by `STEP_SUCCESS` with exactly `step_id`, `output`, and `cached: true`. Executed successes report `cached: false`. Never cache failures; expired entries execute again.
+In `basalt.core.dag.ast`, expose `MemoizationPolicySpec(BaseModel)` with fields `enabled: bool = False`, `key: str | None = None`, `ttl_seconds: float | None = None` (must be positive > 0), and `include_inputs: bool = True`. Add `memoization: MemoizationPolicySpec = Field(default_factory=MemoizationPolicySpec)` to `StepSpec`. Add `STEP_CACHE_HIT = "step_cache_hit"` to `LifecycleEvent`.
 
-In `basalt.core.engine.memoization`, expose the async `ResultCache` API: `get(key)`, `put(key, output, ttl_seconds=None)`, `invalidate(key)`, `clear()`, `keys()`, and `stats()`. `get` returns the cached output dict on a hit, or `None` if the key is missing, invalidated, or expired. `invalidate` reports whether it removed an entry, `clear` returns the removal count, `keys` lists live keys, and `stats` returns integer `entries`, `hits`, and `misses`. Cache boundaries must deep-copy outputs. Extend `WorkflowRunner.__init__` with optional `result_cache`; one cache can be shared across runners.
+In `basalt.core.engine.memoization`, implement async `ResultCache`:
+- `get(key)`: on hit returns deep-copied output dict and increments hits counter; on missing or expired key returns `None` and increments misses counter.
+- `put(key, output, ttl_seconds=None)`: stores deep-copied output dict and expiration.
+- `invalidate(key)`: deletes entry, returning `True` if present else `False`.
+- `clear()`: deletes all entries, returning integer removed count.
+- `keys()`: returns `list[str]` of active (non-expired) keys.
+- `stats()`: returns dict `{"entries": int, "hits": int, "misses": int}` for active entries.
+
+Extend `WorkflowRunner.__init__` with optional `result_cache` (defaulting to a new `ResultCache()` instance). Cache identity derives from: namespace (`policy.key` or `f"{context.dag_id}:{step.id}"`), step definition (ignoring `name`, `description`, `memoization`), upstream outputs of declared `depends_on`, and `context.inputs` when `include_inputs` is true.
+
+In `WorkflowRunner`, when `step.memoization.enabled`:
+- On cache hit: skip execution and `STEP_START`, set step state `COMPLETED` and output in `context`, emit `STEP_CACHE_HIT` with payload `{"step_id": step.id, "cache_key": key, "output": cached}`, immediately followed by `STEP_SUCCESS` with `{"step_id": step.id, "output": cached, "cached": True}`.
+- On miss: execute step; on success cache output with TTL and emit `STEP_SUCCESS` with `{"step_id": step.id, "output": output, "cached": False}`. Never cache failures.
 
 IMPORTANT: Please work on this in a new branch from main and commit everything when you are done.
