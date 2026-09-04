@@ -1,9 +1,9 @@
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..1ddeb59
+index 0000000..5dce1cc
 --- /dev/null
 +++ b/tests/test_result_memoization.py
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,480 @@
 +"""Contract coverage for reusable workflow step results.
 +
 +This suite verifies that deterministic workflow steps can safely reuse
@@ -49,6 +49,8 @@ index 0000000..1ddeb59
 +    counting_executor = executor or CallCountingExecutor()
 +    factory = ExecutorFactory()
 +    factory.register("custom", counting_executor)
++    factory.register("subprocess", counting_executor)
++    factory.register("python_inline", counting_executor)
 +    worker_pool = WorkerPool(factory=factory)
 +    runner_instance = WorkflowRunner(
 +        worker_pool=worker_pool,
@@ -113,6 +115,92 @@ index 0000000..1ddeb59
 +    await runner_instance.run_async(second_dag)
 +
 +    assert counter.calls == 2
++
++
++@pytest.mark.asyncio
++async def test_executor_type_changes_cache_identity() -> None:
++    """Verify that altering step executor type alters cache identity."""
++    runner_instance, counter = create_test_runner()
++    policy = MemoizationPolicySpec(enabled=True, key="shared_exec_key")
++    dag_custom = DAGSpec(
++        id="dag_custom",
++        steps=[StepSpec(id="work", executor_type=ExecutorType.CUSTOM, memoization=policy)],
++    )
++    dag_subprocess = DAGSpec(
++        id="dag_subprocess",
++        steps=[
++            StepSpec(
++                id="work",
++                executor_type=ExecutorType.SUBPROCESS,
++                command="echo custom",
++                memoization=policy,
++            )
++        ],
++    )
++
++    await runner_instance.run_async(dag_custom)
++    await runner_instance.run_async(dag_subprocess)
++
++    assert counter.calls == 2
++
++
++@pytest.mark.asyncio
++async def test_executor_configuration_changes_cache_identity() -> None:
++    """Verify that altering executor commands or callable names alters cache identity."""
++    runner_instance, counter = create_test_runner()
++    policy = MemoizationPolicySpec(enabled=True, key="shared_cfg_key")
++    dag_cmd1 = DAGSpec(
++        id="dag_cmd1",
++        steps=[
++            StepSpec(
++                id="work",
++                executor_type=ExecutorType.SUBPROCESS,
++                command="echo run_1",
++                memoization=policy,
++            )
++        ],
++    )
++    dag_cmd2 = DAGSpec(
++        id="dag_cmd2",
++        steps=[
++            StepSpec(
++                id="work",
++                executor_type=ExecutorType.SUBPROCESS,
++                command="echo run_2",
++                memoization=policy,
++            )
++        ],
++    )
++    dag_fn1 = DAGSpec(
++        id="dag_fn1",
++        steps=[
++            StepSpec(
++                id="work",
++                executor_type=ExecutorType.PYTHON_INLINE,
++                callable_name="callable_a",
++                memoization=policy,
++            )
++        ],
++    )
++    dag_fn2 = DAGSpec(
++        id="dag_fn2",
++        steps=[
++            StepSpec(
++                id="work",
++                executor_type=ExecutorType.PYTHON_INLINE,
++                callable_name="callable_b",
++                memoization=policy,
++            )
++        ],
++    )
++
++    await runner_instance.run_async(dag_cmd1)
++    await runner_instance.run_async(dag_cmd2)
++    assert counter.calls == 2
++
++    await runner_instance.run_async(dag_fn1)
++    await runner_instance.run_async(dag_fn2)
++    assert counter.calls == 4
 +
 +
 +@pytest.mark.asyncio
@@ -194,7 +282,7 @@ index 0000000..1ddeb59
 +    """Verify that entries expire after their TTL has elapsed."""
 +    cache = ResultCache()
 +    await cache.put("ephemeral_key", {"temp": True}, ttl_seconds=0.01)
-+    await asyncio.sleep(0.05)
++    await asyncio.sleep(0.1)
 +
 +    assert await cache.get("ephemeral_key") is None
 +
@@ -282,7 +370,7 @@ index 0000000..1ddeb59
 +    dag_spec = build_test_dag(policy=expiring_policy)
 +
 +    await runner_instance.run_async(dag_spec)
-+    await asyncio.sleep(0.05)
++    await asyncio.sleep(0.1)
 +    await runner_instance.run_async(dag_spec)
 +
 +    assert counter.calls == 2
@@ -398,10 +486,10 @@ index 0000000..1ddeb59
 +    assert counter.calls == 2
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..8e34476
+index 0000000..5bcff00
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,314 @@
 +"""Additional contract coverage for the public ResultCache surface.
 +
 +This module validates detailed boundary contracts for ResultCache methods,
@@ -447,7 +535,7 @@ index 0000000..8e34476
 +    await cache.put("persistent_key", {"status": "persists"})
 +    await cache.put("fleeting_key", {"status": "vanishes"}, ttl_seconds=0.01)
 +
-+    await asyncio.sleep(0.05)
++    await asyncio.sleep(0.1)
 +    active_keys = await cache.keys()
 +
 +    assert active_keys == ["persistent_key"]
@@ -674,3 +762,45 @@ index 0000000..8e34476
 +
 +    assert policy_a == policy_b
 +    assert policy_a != policy_c
++
++
++@pytest.mark.asyncio
++async def test_display_metadata_does_not_bust_cache_identity() -> None:
++    """Verify that changing display metadata (name, description) preserves cache hit."""
++    worker = DedicatedWorker()
++    factory = ExecutorFactory()
++    factory.register("custom", worker)
++    pool = WorkerPool(factory=factory)
++    cache = ResultCache()
++    runner = WorkflowRunner(worker_pool=pool, result_cache=cache)
++
++    policy = MemoizationPolicySpec(enabled=True, key="shared_display_meta")
++    dag1 = DAGSpec(
++        id="dag_meta1",
++        steps=[
++            StepSpec(
++                id="work",
++                executor_type=ExecutorType.CUSTOM,
++                name="First Display Name",
++                description="First description",
++                memoization=policy,
++            )
++        ],
++    )
++    dag2 = DAGSpec(
++        id="dag_meta2",
++        steps=[
++            StepSpec(
++                id="work",
++                executor_type=ExecutorType.CUSTOM,
++                name="Second Display Name",
++                description="Second description",
++                memoization=policy,
++            )
++        ],
++    )
++
++    await runner.run_async(dag1)
++    await runner.run_async(dag2)
++
++    assert worker.invocation_count == 1

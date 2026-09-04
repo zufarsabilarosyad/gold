@@ -4,6 +4,8 @@
     "tests.test_result_memoization.test_memo_policy_defaults_disabled",
     "tests.test_result_memoization.test_memo_policy_rejects_nonpositive_ttl",
     "tests.test_result_memoization.test_executable_definition_changes_cache_identity",
+    "tests.test_result_memoization.test_executor_type_changes_cache_identity",
+    "tests.test_result_memoization.test_executor_configuration_changes_cache_identity",
     "tests.test_result_memoization.test_dependency_output_changes_cache_identity",
     "tests.test_result_memoization.test_result_cache_put_and_get",
     "tests.test_result_memoization.test_result_cache_returns_copies",
@@ -24,7 +26,18 @@
     "tests.test_result_memoization.test_failed_work_is_not_cached",
     "tests.test_result_memoization_contract_notes.test_keys_only_lists_live_entries",
     "tests.test_result_memoization_contract_notes.test_invalidate_missing_key_reports_false",
-    "tests.test_result_memoization_contract_notes.test_clear_leaves_zero_entries"
+    "tests.test_result_memoization_contract_notes.test_clear_leaves_zero_entries",
+    "tests.test_result_memoization_contract_notes.test_result_cache_overwriting_existing_key",
+    "tests.test_result_memoization_contract_notes.test_result_cache_deep_copy_isolation_nested_structures",
+    "tests.test_result_memoization_contract_notes.test_result_cache_stats_hit_miss_counter_accuracy",
+    "tests.test_result_memoization_contract_notes.test_result_cache_concurrent_operations",
+    "tests.test_result_memoization_contract_notes.test_multi_step_workflow_partial_memoization",
+    "tests.test_result_memoization_contract_notes.test_memoization_cache_hit_preserves_step_state",
+    "tests.test_result_memoization_contract_notes.test_result_cache_empty_dictionary_handling",
+    "tests.test_result_memoization_contract_notes.test_result_cache_multiple_clears_idempotent",
+    "tests.test_result_memoization_contract_notes.test_result_cache_diverse_data_types",
+    "tests.test_result_memoization_contract_notes.test_memoization_policy_spec_equality_and_copies",
+    "tests.test_result_memoization_contract_notes.test_display_metadata_does_not_bust_cache_identity"
   ],
   "p2p_node_ids": [
     "tests.test_context_evaluator.test_context_variable_path_resolution",
