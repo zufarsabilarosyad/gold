@@ -704,10 +704,10 @@ index 0000000..ebeec44
 +    assert second_run.outputs["work"]["call"] == 1
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..5bcff00
+index 0000000..57662ae
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,314 @@
+@@ -0,0 +1,401 @@
 +"""Additional contract coverage for the public ResultCache surface.
 +
 +This module validates detailed boundary contracts for ResultCache methods,
@@ -722,6 +722,7 @@ index 0000000..5bcff00
 +from basalt.core.dag.ast import DAGSpec, ExecutorType, MemoizationPolicySpec, StepSpec
 +from basalt.core.engine.hooks import HookRegistry, LifecycleEvent
 +from basalt.core.engine.memoization import ResultCache
++from basalt.core.engine.memoization_admin import CacheAdministration, CacheSummary
 +from basalt.core.engine.runner import WorkflowRunner
 +from basalt.core.executors.base import BaseExecutor
 +from basalt.core.executors.pool import ExecutorFactory, WorkerPool
@@ -1022,3 +1023,89 @@ index 0000000..5bcff00
 +    await runner.run_async(dag2)
 +
 +    assert worker.invocation_count == 1
++
++
++@pytest.mark.asyncio
++async def test_cache_administration_summary_empty() -> None:
++    """Verify that CacheAdministration.summary reports zero counts and empty keys."""
++    cache = ResultCache()
++    admin = CacheAdministration(cache)
++    summary = await admin.summary()
++    assert summary.entries == 0
++    assert summary.hits == 0
++    assert summary.misses == 0
++    assert summary.hit_rate == 0.0
++    assert summary.keys == ()
++    assert summary.as_dict() == {
++        "entries": 0,
++        "hits": 0,
++        "misses": 0,
++        "hit_rate": 0.0,
++        "keys": [],
++    }
++
++
++@pytest.mark.asyncio
++async def test_cache_administration_summary_with_hits_and_misses() -> None:
++    """Verify that summary aggregates hits, misses, sorted keys, and hit rate correctly."""
++    cache = ResultCache()
++    admin = CacheAdministration(cache)
++    await cache.put("key_b", {"val": 2})
++    await cache.put("key_a", {"val": 1})
++    await cache.get("key_a")
++    await cache.get("missing_key")
++
++    summary = await admin.summary()
++    assert summary.entries == 2
++    assert summary.hits == 1
++    assert summary.misses == 1
++    assert summary.hit_rate == 0.5
++    assert summary.keys == ("key_a", "key_b")
++    as_dict = summary.as_dict()
++    assert as_dict["keys"] == ["key_a", "key_b"]
++    assert as_dict["hit_rate"] == 0.5
++
++
++@pytest.mark.asyncio
++async def test_cache_administration_contains_live_and_expired() -> None:
++    """Verify that contains() reports True for live keys and False for missing or expired keys."""
++    cache = ResultCache()
++    admin = CacheAdministration(cache)
++    await cache.put("live_key", {"state": "alive"})
++    await cache.put("ephemeral_key", {"state": "dead"}, ttl_seconds=0.01)
++
++    assert await admin.contains("live_key") is True
++    assert await admin.contains("non_existent") is False
++
++    await asyncio.sleep(0.1)
++    assert await admin.contains("ephemeral_key") is False
++
++
++@pytest.mark.asyncio
++async def test_cache_administration_invalidate_prefix() -> None:
++    """Verify that invalidate_prefix removes only matching keys and returns the count."""
++    cache = ResultCache()
++    admin = CacheAdministration(cache)
++    await cache.put("app:tenant1:step1", {"data": 1})
++    await cache.put("app:tenant1:step2", {"data": 2})
++    await cache.put("app:tenant2:step1", {"data": 3})
++    await cache.put("other:step", {"data": 4})
++
++    removed = await admin.invalidate_prefix("app:tenant1:")
++    assert removed == 2
++    active = sorted(await cache.keys())
++    assert active == ["app:tenant2:step1", "other:step"]
++
++
++@pytest.mark.asyncio
++async def test_cache_administration_invalidate_many_deduplicates() -> None:
++    """Verify that invalidate_many handles duplicates and non-existent keys properly."""
++    cache = ResultCache()
++    admin = CacheAdministration(cache)
++    await cache.put("k1", {"data": 1})
++    await cache.put("k2", {"data": 2})
++    await cache.put("k3", {"data": 3})
++
++    removed = await admin.invalidate_many(["k1", "k1", "k2", "unknown", "k2"])
++    assert removed == 2
++    assert await cache.keys() == ["k3"]

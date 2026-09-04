@@ -44,7 +44,12 @@
     "tests.test_result_memoization_contract_notes.test_result_cache_multiple_clears_idempotent",
     "tests.test_result_memoization_contract_notes.test_result_cache_diverse_data_types",
     "tests.test_result_memoization_contract_notes.test_memoization_policy_spec_equality_and_copies",
-    "tests.test_result_memoization_contract_notes.test_display_metadata_does_not_bust_cache_identity"
+    "tests.test_result_memoization_contract_notes.test_display_metadata_does_not_bust_cache_identity",
+    "tests.test_result_memoization_contract_notes.test_cache_administration_summary_empty",
+    "tests.test_result_memoization_contract_notes.test_cache_administration_summary_with_hits_and_misses",
+    "tests.test_result_memoization_contract_notes.test_cache_administration_contains_live_and_expired",
+    "tests.test_result_memoization_contract_notes.test_cache_administration_invalidate_prefix",
+    "tests.test_result_memoization_contract_notes.test_cache_administration_invalidate_many_deduplicates"
   ],
   "p2p_node_ids": [
     "tests.test_context_evaluator.test_context_variable_path_resolution",
