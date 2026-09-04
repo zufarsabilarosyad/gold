@@ -1,9 +1,9 @@
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..5dce1cc
+index 0000000..c9531f6
 --- /dev/null
 +++ b/tests/test_result_memoization.py
-@@ -0,0 +1,480 @@
+@@ -0,0 +1,588 @@
 +"""Contract coverage for reusable workflow step results.
 +
 +This suite verifies that deterministic workflow steps can safely reuse
@@ -63,7 +63,7 @@ index 0000000..5dce1cc
 +def build_test_dag(
 +    policy: MemoizationPolicySpec | None = None,
 +    include_dependent_step: bool = False,
-+    cache_key: str = "shared",
++    cache_key: str | None = None,
 +) -> DAGSpec:
 +    """Construct a minimal DAG specification for memoization testing."""
 +    first_step = StepSpec(
@@ -100,6 +100,13 @@ index 0000000..5dce1cc
 +        MemoizationPolicySpec(enabled=True, ttl_seconds=-1.0)
 +    with pytest.raises(ValueError):
 +        MemoizationPolicySpec(enabled=True, ttl_seconds=-0.001)
++
++
++def test_lifecycle_event_step_cache_hit_value() -> None:
++    """Verify that LifecycleEvent.STEP_CACHE_HIT has the exact string enum value."""
++    assert LifecycleEvent.STEP_CACHE_HIT == "step_cache_hit"
++    assert LifecycleEvent.STEP_CACHE_HIT.value == "step_cache_hit"
++    assert LifecycleEvent("step_cache_hit") is LifecycleEvent.STEP_CACHE_HIT
 +
 +
 +@pytest.mark.asyncio
@@ -484,6 +491,107 @@ index 0000000..5dce1cc
 +    await runner_instance.run_async(dag_spec)
 +
 +    assert counter.calls == 2
++
++
++@pytest.mark.asyncio
++async def test_memoization_without_explicit_key_uses_automatic_identity_and_hits_cache() -> None:
++    """Verify that steps without an explicit key (key=None) cache using automatic identity."""
++    captured_events: list[tuple[Any, dict[str, Any]]] = []
++    hooks = HookRegistry()
++    for event_type in (LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS):
++        hooks.register(
++            event_type,
++            lambda event, context, payload: captured_events.append((event, payload)),
++        )
++
++    runner_instance, counter = create_test_runner(hooks=hooks)
++    dag_spec = DAGSpec(
++        id="auto_dag",
++        steps=[
++            StepSpec(
++                id="auto_step",
++                executor_type=ExecutorType.CUSTOM,
++                memoization=MemoizationPolicySpec(enabled=True),
++            )
++        ],
++    )
++
++    first_result = await runner_instance.run_async(dag_spec, {"value": 42})
++    assert counter.calls == 1
++    assert first_result.outputs["auto_step"]["call"] == 1
++    assert captured_events[-1][1]["cached"] is False
++
++    captured_events.clear()
++    second_result = await runner_instance.run_async(dag_spec, {"value": 42})
++    assert counter.calls == 1
++    assert second_result.outputs["auto_step"]["call"] == 1
++    assert len(captured_events) == 2
++    assert captured_events[0][0] == LifecycleEvent.STEP_CACHE_HIT
++    assert captured_events[0][1]["step_id"] == "auto_step"
++    assert captured_events[1][0] == LifecycleEvent.STEP_SUCCESS
++    assert captured_events[1][1]["cached"] is True
++
++
++@pytest.mark.asyncio
++async def test_automatic_identity_distinguishes_different_dags_and_steps() -> None:
++    """Verify that automatic identity (key=None) isolates different DAG IDs and step IDs."""
++    runner_instance, counter = create_test_runner()
++    dag_alpha = DAGSpec(
++        id="dag_alpha",
++        steps=[
++            StepSpec(
++                id="compute",
++                executor_type=ExecutorType.CUSTOM,
++                memoization=MemoizationPolicySpec(enabled=True),
++            )
++        ],
++    )
++    dag_beta = DAGSpec(
++        id="dag_beta",
++        steps=[
++            StepSpec(
++                id="compute",
++                executor_type=ExecutorType.CUSTOM,
++                memoization=MemoizationPolicySpec(enabled=True),
++            )
++        ],
++    )
++
++    await runner_instance.run_async(dag_alpha)
++    await runner_instance.run_async(dag_beta)
++    assert counter.calls == 2
++
++    dag_multi_step = DAGSpec(
++        id="dag_multi_step",
++        steps=[
++            StepSpec(
++                id="step_one",
++                executor_type=ExecutorType.CUSTOM,
++                memoization=MemoizationPolicySpec(enabled=True),
++            ),
++            StepSpec(
++                id="step_two",
++                executor_type=ExecutorType.CUSTOM,
++                memoization=MemoizationPolicySpec(enabled=True),
++            ),
++        ],
++    )
++    await runner_instance.run_async(dag_multi_step)
++    assert counter.calls == 4
++
++
++@pytest.mark.asyncio
++async def test_explicit_key_shares_namespace_and_hits_cache() -> None:
++    """Verify that an explicit key provides a stable namespace and hits cache across runs."""
++    runner_instance, counter = create_test_runner()
++    dag_spec = build_test_dag(cache_key="my_custom_namespace")
++
++    first_run = await runner_instance.run_async(dag_spec)
++    second_run = await runner_instance.run_async(dag_spec)
++
++    assert counter.calls == 1
++    assert first_run.outputs["work"]["call"] == 1
++    assert second_run.outputs["work"]["call"] == 1
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
 index 0000000..5bcff00

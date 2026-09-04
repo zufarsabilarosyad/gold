@@ -3,6 +3,7 @@
   "f2p_node_ids": [
     "tests.test_result_memoization.test_memo_policy_defaults_disabled",
     "tests.test_result_memoization.test_memo_policy_rejects_nonpositive_ttl",
+    "tests.test_result_memoization.test_lifecycle_event_step_cache_hit_value",
     "tests.test_result_memoization.test_executable_definition_changes_cache_identity",
     "tests.test_result_memoization.test_executor_type_changes_cache_identity",
     "tests.test_result_memoization.test_executor_configuration_changes_cache_identity",
@@ -24,6 +25,9 @@
     "tests.test_result_memoization.test_cached_parent_allows_dependent_step",
     "tests.test_result_memoization.test_cache_can_be_shared_between_runners",
     "tests.test_result_memoization.test_failed_work_is_not_cached",
+    "tests.test_result_memoization.test_memoization_without_explicit_key_uses_automatic_identity_and_hits_cache",
+    "tests.test_result_memoization.test_automatic_identity_distinguishes_different_dags_and_steps",
+    "tests.test_result_memoization.test_explicit_key_shares_namespace_and_hits_cache",
     "tests.test_result_memoization_contract_notes.test_keys_only_lists_live_entries",
     "tests.test_result_memoization_contract_notes.test_invalidate_missing_key_reports_false",
     "tests.test_result_memoization_contract_notes.test_clear_leaves_zero_entries",
