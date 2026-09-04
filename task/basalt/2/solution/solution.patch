@@ -55,10 +55,10 @@ index 0861b14..794f99f 100644
          self.register(LifecycleEvent.STEP_SKIPPED, callback)
 diff --git a/src/basalt/core/engine/memoization.py b/src/basalt/core/engine/memoization.py
 new file mode 100644
-index 0000000..db9f03d
+index 0000000..5aa77fe
 --- /dev/null
 +++ b/src/basalt/core/engine/memoization.py
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,155 @@
 +"""Small, concurrency-safe result cache used by :class:`WorkflowRunner`.
 +
 +The cache deliberately stores only JSON-like successful executor outputs.  It is
@@ -210,6 +210,9 @@ index 0000000..db9f03d
 +    async def stats(self) -> dict[str, int]:
 +        """Return simple observability counters for application status APIs."""
 +        async with self._lock:
++            expired = [key for key, item in self._entries.items() if item.expired]
++            for key in expired:
++                del self._entries[key]
 +            return {"entries": len(self._entries), "hits": self._hits, "misses": self._misses}
 diff --git a/src/basalt/core/engine/memoization_admin.py b/src/basalt/core/engine/memoization_admin.py
 new file mode 100644

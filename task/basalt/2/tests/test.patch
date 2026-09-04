@@ -1,9 +1,9 @@
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..0a4fa6b
+index 0000000..ebeec44
 --- /dev/null
 +++ b/tests/test_result_memoization.py
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,698 @@
 +"""Contract coverage for reusable workflow step results.
 +
 +This suite verifies that deterministic workflow steps can safely reuse
@@ -304,6 +304,21 @@ index 0000000..0a4fa6b
 +
 +    stats = await cache.stats()
 +    assert stats == {"entries": 1, "hits": 1, "misses": 1}
++
++
++@pytest.mark.asyncio
++async def test_stats_reports_only_active_entries_after_expiry() -> None:
++    """Verify that stats() counts only live entries after TTL expires without calling get/keys."""
++    cache = ResultCache()
++    await cache.put("live_entry", {"state": "active"})
++    await cache.put("expired_entry", {"state": "stale"}, ttl_seconds=0.01)
++
++    await asyncio.sleep(0.1)
++
++    stats = await cache.stats()
++    assert stats["entries"] == 1
++    assert stats["hits"] == 0
++    assert stats["misses"] == 0
 +
 +
 +@pytest.mark.asyncio

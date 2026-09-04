@@ -14,6 +14,7 @@
     "tests.test_result_memoization.test_result_cache_clear_reports_count",
     "tests.test_result_memoization.test_result_cache_expires_entries",
     "tests.test_result_memoization.test_result_cache_stats_track_hits_and_misses",
+    "tests.test_result_memoization.test_stats_reports_only_active_entries_after_expiry",
     "tests.test_result_memoization.test_enabled_step_reuses_result_across_runs",
     "tests.test_result_memoization.test_disabled_step_always_executes",
     "tests.test_result_memoization.test_changed_inputs_miss_cache",
