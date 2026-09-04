@@ -1,11 +1,15 @@
-Right now, a single step failure aborts Basalt's entire workflow run, skipping all remaining work and ignoring configured retry policies and failure continuation actions.
+Implement workflow failure policies, attempt reporting, and checkpoint resumption in Basalt.
 
-First, add `step_attempts: dict[str, int] = Field(default_factory=dict)` to `WorkflowRunResult` to record how many times each step ran. When a step specifies `on_failure: retry`, retry it after failures up to `max_retries` additional times (yielding `1 + max_retries` total attempts) using the step's backoff policy. When `jitter` is disabled, retry delay intervals must be deterministic.
+For `on_failure: retry`, execute the initial attempt plus up to `max_retries` additional attempts using the step backoff policy. When jitter is disabled, delay intervals must be deterministic; recovery unblocks downstream dependents. Record totals in `WorkflowRunResult.step_attempts: dict[str, int] = Field(default_factory=dict)`.
 
-Recoverable failures must dispatch `STEP_RETRY` before each backoff sleep, including the current `attempt`, `delay_seconds`, and error. Dispatch `STEP_START` with `step_id` and the one-based `attempt` for every attempt. Success and failure hooks continue to represent only the terminal step outcome: `STEP_SUCCESS` includes `step_id`, `attempt`, and output, while `STEP_FAILURE` includes `step_id`, `attempt`, and error. When a retried step recovers, downstream dependent steps must execute normally.
+Emit `STEP_START` with `step_id` and one-based `attempt` on every attempt. Before each backoff delay, emit `STEP_RETRY` with `attempt`, `delay_seconds`, and error. Terminal hooks dispatch once: `STEP_SUCCESS` includes `step_id`, `attempt`, and output; `STEP_FAILURE` includes `step_id`, `attempt`, and error.
 
-Preserve `fail_fast` as the default failure behavior, aborting all downstream pending work when a step terminally fails. When a step specifies `on_failure: continue`, skip only its direct and transitive child steps, allowing independent parallel branches and unrelated later steps to run to completion. Skipped steps must be set to `StepState.SKIPPED` and emit `STEP_SKIPPED` (passing `step_id`). If any step ends in failure under `continue`, mark the overall workflow status as `FAILED`.
+Add `WorkflowRunResult.step_attempt_history` keyed by step ID. Each entry contains `attempt`, `state`, `delay_seconds`, and `error`. Recoverable failures record state `RETRYING`; terminal entries have zero delay. Cancellation during backoff appends a `CANCELLED` entry for that attempt. Skipped steps have no history.
 
-Cancelling an active run while a step is executing or waiting in retry sleep must halt execution immediately, prevent any future attempts, and leave the workflow in a `CANCELLED` state. Persist attempt numbers in SQLite storage (`StepRunModel.attempt`), return them in REST API run status responses, and display them in CLI output (`Attempts` column in run status tables and `attempt` in step details).
+By default, `fail_fast` aborts pending work on terminal failure. With `on_failure: continue`, skip only direct and transitive child steps while independent branches proceed. Mark skipped steps `StepState.SKIPPED`, emit `STEP_SKIPPED` (`step_id`), and mark the workflow `FAILED`. Cancellation during execution or backoff halts further attempts and ends `CANCELLED`.
+
+Support resumption via `WorkflowRunner.run_async(resume_from=...)` and `BasaltEngine.retry_run(run_id, new_run_id=None)`. Resuming requires status `FAILED`, `TIMEOUT`, or `CANCELLED`, and identical DAG and step IDs, raising `ValueError` on mismatch. Reuse completed steps without re-executing or dispatching step hooks, preserving outputs, counts, and histories. Reset non-completed steps with fresh retry allowances while attempt numbers, histories, and hook payloads remain cumulative.
+
+Expose `parent_run_id`, incrementing `resume_depth`, and ordered `reused_step_ids` on results, SQLite storage, REST endpoints, and the CLI (`run retry`, status tables, and JSON details).
 
 IMPORTANT: Please work on this in a new branch from main and commit everything when you are done.

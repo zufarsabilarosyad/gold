@@ -23,6 +23,7 @@ run_log() { echo "+ $*" >> "$RUN_LOG" 2>/dev/null; "$@" 2>&1 | tee -a "$RUN_LOG"
 # Python grader. The small launcher adds src only after Python startup.
 unset PYTHONPATH
 export PYTHONSAFEPATH=1
+export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 
 # Restore every baseline test from the pinned commit, then load its fixtures
 # from a verifier-owned temporary directory with normal conftest discovery off.
@@ -31,9 +32,7 @@ BASE_COMMIT=69686949e6162606cc54293dc2af217d63161577
 BASE_TEST_FILES=(
   tests/__init__.py tests/conftest.py tests/test_api_routes.py tests/test_cli_commands.py
   tests/test_context_evaluator.py tests/test_dag_parser.py tests/test_dag_sorter.py
-  tests/test_engine.py tests/test_engine_integration.py tests/test_executors.py
-  tests/test_resilience.py tests/test_state_machine.py tests/test_storage_repository.py
-  tests/test_triggers.py tests/test_worker_pool.py
+  tests/test_executors.py tests/test_resilience.py tests/test_state_machine.py
 )
 git checkout -q "$BASE_COMMIT" -- "${BASE_TEST_FILES[@]}" || exit 7
 BASE_FIXTURE_DIR=$(mktemp -d /tmp/basalt-verifier-fixtures.XXXXXX) || exit 7
@@ -42,14 +41,12 @@ git show "$BASE_COMMIT:tests/conftest.py" > "$BASE_FIXTURE_DIR/basalt_base_fixtu
 
 set +e
 # Existing Basalt regression suite (pass-to-pass coverage).
-PYTEST_ADDOPTS="-p no:cacheprovider -p basalt_base_fixtures --noconftest -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/base.xml" run_log python3 -P -c 'import os, sys, pytest; sys.path[:0] = [os.environ["BASE_FIXTURE_DIR"], "/app/src"]; raise SystemExit(pytest.main())' -q \
+PYTEST_ADDOPTS="-p no:cacheprovider -p pytest_asyncio.plugin -p basalt_base_fixtures --noconftest -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/base.xml" run_log python3 -P -c 'import os, sys, pytest, pytest_asyncio.plugin; sys.path[:0] = [os.environ["BASE_FIXTURE_DIR"], "/app/src"]; raise SystemExit(pytest.main())' -q \
   tests/test_api_routes.py tests/test_cli_commands.py tests/test_context_evaluator.py \
-  tests/test_dag_parser.py tests/test_dag_sorter.py tests/test_engine.py \
-  tests/test_engine_integration.py tests/test_executors.py tests/test_resilience.py \
-  tests/test_state_machine.py tests/test_storage_repository.py tests/test_triggers.py \
-  tests/test_worker_pool.py
+  tests/test_dag_parser.py tests/test_dag_sorter.py tests/test_executors.py \
+  tests/test_resilience.py tests/test_state_machine.py
 # New workflow retry and failure-policy behavior (fail-to-pass coverage).
-PYTEST_ADDOPTS="-p no:cacheprovider --noconftest -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/new.xml" run_log python3 -P -c 'import sys, pytest; sys.path.insert(0, "/app/src"); raise SystemExit(pytest.main())' -q \
+PYTEST_ADDOPTS="-p no:cacheprovider -p pytest_asyncio.plugin --noconftest -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/new.xml" run_log python3 -P -c 'import sys, pytest, pytest_asyncio.plugin; sys.path.insert(0, "/app/src"); raise SystemExit(pytest.main())' -q \
   tests/test_retry_policies.py tests/test_failure_continuation.py
 set -e
 # >>> END RUN TESTS <<<

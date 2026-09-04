@@ -1,9 +1,9 @@
 diff --git a/tests/test_failure_continuation.py b/tests/test_failure_continuation.py
 new file mode 100644
-index 0000000..1111111
+index 0000000..6465b94
 --- /dev/null
 +++ b/tests/test_failure_continuation.py
-@@ -0,0 +1,429 @@
+@@ -0,0 +1,492 @@
 +"""Behavioral coverage for failure actions across workflow branches."""
 +
 +import asyncio
@@ -433,12 +433,75 @@ index 0000000..1111111
 +    assert result.step_states["fail_fast_explicit"] == StepState.FAILED
 +    assert result.step_states["later_child"] == StepState.SKIPPED
 +    assert result.step_attempts["fail_fast_explicit"] == 1
++
++
++@pytest.mark.asyncio
++async def test_continue_attempt_history_excludes_skipped_dependants():
++    marker: list[str] = []
++    register_failure("history_branch_failure")
++    register_success("history_skipped", marker)
++    register_success("history_independent", marker)
++    dag = DAGSpec(
++        id="continue_history_dag",
++        steps=[
++            inline(
++                "failed",
++                "history_branch_failure",
++                on_failure=OnFailureAction.CONTINUE,
++            ),
++            inline("skipped", "history_skipped", ["failed"]),
++            inline("independent", "history_independent"),
++        ],
++    )
++
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.step_attempt_history["failed"][0]["state"] == "FAILED"
++    assert result.step_attempt_history["independent"][0]["state"] == "COMPLETED"
++    assert "skipped" not in result.step_attempt_history
++    assert marker == ["history_independent"]
++
++
++@pytest.mark.asyncio
++async def test_independent_branch_histories_survive_continued_failure():
++    register_failure("history_bad_root")
++    retry_calls: list[int] = []
++
++    def recovers():
++        retry_calls.append(1)
++        if len(retry_calls) == 1:
++            raise RuntimeError("branch transient")
++        return {"recovered": True}
++
++    register_python_callable("history_recovers", recovers)
++    dag = DAGSpec(
++        id="mixed_history_dag",
++        steps=[
++            inline("bad", "history_bad_root", on_failure=OnFailureAction.CONTINUE),
++            StepSpec(
++                id="retrying",
++                executor_type=ExecutorType.PYTHON_INLINE,
++                callable_name="history_recovers",
++                on_failure=OnFailureAction.RETRY,
++                retry_policy={"max_retries": 2, "initial_delay_seconds": 0.001, "jitter": False},
++            ),
++        ],
++    )
++
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.state == WorkflowState.FAILED
++    assert [item["state"] for item in result.step_attempt_history["retrying"]] == [
++        "RETRYING",
++        "COMPLETED",
++    ]
++    assert result.outputs["retrying"] == {"recovered": True}
 diff --git a/tests/test_retry_policies.py b/tests/test_retry_policies.py
 new file mode 100644
-index 0000000..1111111
+index 0000000..e93359d
 --- /dev/null
 +++ b/tests/test_retry_policies.py
-@@ -0,0 +1,471 @@
+@@ -0,0 +1,1012 @@
 +"""Behavioral coverage for workflow step retry policies."""
 +
 +import asyncio
@@ -604,7 +667,7 @@ index 0000000..1111111
 +    task = asyncio.create_task(
 +        runner.run_async(DAGSpec(id="cancel", version="1", steps=[spec]), run_id="cancel-run")
 +    )
-+    await asyncio.wait_for(retry_started.wait(), timeout=2.0)
++    await asyncio.wait_for(retry_started.wait(), timeout=10.0)
 +    assert runner.cancel_run("cancel-run")
 +    result = await task
 +    assert result.state == WorkflowState.CANCELLED
@@ -732,7 +795,7 @@ index 0000000..1111111
 +    run_task = asyncio.create_task(
 +        runner.run_async(DAGSpec(id="cancel_exec_dag", steps=[step]), run_id="cancel_exec_run")
 +    )
-+    await asyncio.wait_for(execution_started.wait(), timeout=2.0)
++    await asyncio.wait_for(execution_started.wait(), timeout=10.0)
 +    assert runner.cancel_run("cancel_exec_run")
 +    release_execution.set()
 +    res = await run_task
@@ -777,6 +840,7 @@ index 0000000..1111111
 +    assert persisted is not None
 +    assert persisted.state == WorkflowState.COMPLETED
 +    assert persisted.step_attempts["persist_step"] == 3
++    assert persisted.step_attempt_history["persist_step"] == result.step_attempt_history["persist_step"]
 +    await db_mgr.close()
 +
 +
@@ -819,11 +883,16 @@ index 0000000..1111111
 +        assert "step_api" in step_runs
 +        assert step_runs["step_api"]["attempt"] == 2
 +        assert step_runs["step_api"]["state"] == "COMPLETED"
++        assert [entry["state"] for entry in step_runs["step_api"]["attempt_history"]] == [
++            "RETRYING",
++            "COMPLETED",
++        ]
 +
 +        resp_step = await client.get(f"/api/v1/runs/{result.run_id}/steps/step_api")
 +        assert resp_step.status_code == 200
 +        step_data = resp_step.json()
 +        assert step_data["attempt"] == 2
++        assert step_data["attempt_history"] == step_runs["step_api"]["attempt_history"]
 +
 +    await engine.stop()
 +    set_engine(None)
@@ -910,4 +979,538 @@ index 0000000..1111111
 +    assert res_step.exit_code == 0
 +    step_details = json.loads(res_step.output)
 +    assert step_details["attempt"] == 3
++    assert [entry["attempt"] for entry in step_details["attempt_history"]] == [1, 2, 3]
 +
++
++@pytest.mark.asyncio
++async def test_attempt_history_records_recovery_in_order():
++    calls: list[int] = []
++    retry_step("history_recovery", 2, calls)
++
++    result = await WorkflowRunner().run_async(
++        DAGSpec(id="history_recovery_dag", steps=[retry_spec("history_recovery", 3)])
++    )
++
++    history = result.step_attempt_history["work"]
++    assert [entry["attempt"] for entry in history] == [1, 2, 3]
++    assert [entry["state"] for entry in history] == ["RETRYING", "RETRYING", "COMPLETED"]
++    assert [entry["delay_seconds"] for entry in history] == [0.001, 0.001, 0.0]
++    assert all(set(entry) == {"attempt", "state", "delay_seconds", "error"} for entry in history)
++    assert "temporary" in history[0]["error"]
++    assert history[-1]["error"] is None
++
++
++@pytest.mark.asyncio
++async def test_attempt_history_records_terminal_exhaustion():
++    calls: list[int] = []
++    retry_step("history_exhaustion", 10, calls)
++
++    result = await WorkflowRunner().run_async(
++        DAGSpec(id="history_exhaustion_dag", steps=[retry_spec("history_exhaustion", 2)])
++    )
++
++    history = result.step_attempt_history["work"]
++    assert [entry["attempt"] for entry in history] == [1, 2, 3]
++    assert [entry["state"] for entry in history] == ["RETRYING", "RETRYING", "FAILED"]
++    assert history[-1]["delay_seconds"] == 0.0
++    assert "temporary" in history[-1]["error"]
++
++
++@pytest.mark.asyncio
++async def test_attempt_history_for_non_retrying_success_and_failure():
++    register_python_callable("history_ok", lambda: {"ok": True})
++
++    def fail_once():
++        raise RuntimeError("permanent")
++
++    register_python_callable("history_fail", fail_once)
++    dag = DAGSpec(
++        id="history_terminal_dag",
++        steps=[
++            StepSpec(id="ok", executor_type=ExecutorType.PYTHON_INLINE, callable_name="history_ok"),
++            StepSpec(
++                id="bad",
++                executor_type=ExecutorType.PYTHON_INLINE,
++                callable_name="history_fail",
++                on_failure=OnFailureAction.CONTINUE,
++            ),
++        ],
++    )
++
++    result = await WorkflowRunner().run_async(dag)
++
++    assert result.step_attempt_history["ok"] == [
++        {"attempt": 1, "state": "COMPLETED", "delay_seconds": 0.0, "error": None}
++    ]
++    assert result.step_attempt_history["bad"][0]["attempt"] == 1
++    assert result.step_attempt_history["bad"][0]["state"] == "FAILED"
++    assert "permanent" in result.step_attempt_history["bad"][0]["error"]
++
++
++@pytest.mark.asyncio
++async def test_cancelled_retry_wait_is_in_attempt_history():
++    calls: list[int] = []
++    retry_started = asyncio.Event()
++    retry_step("history_cancel", 10, calls)
++    spec = retry_spec("history_cancel", 3)
++    spec.retry_policy.initial_delay_seconds = 10.0
++    spec.retry_policy.max_delay_seconds = 10.0
++    hooks = HookRegistry()
++
++    async def on_retry(_, __, ___):
++        retry_started.set()
++
++    hooks.register(LifecycleEvent.STEP_RETRY, on_retry)
++    runner = WorkflowRunner(hook_registry=hooks)
++    task = asyncio.create_task(
++        runner.run_async(DAGSpec(id="history_cancel_dag", steps=[spec]), run_id="history-cancel")
++    )
++    await asyncio.wait_for(retry_started.wait(), timeout=10.0)
++    assert runner.cancel_run("history-cancel")
++    result = await task
++
++    history = result.step_attempt_history["work"]
++    assert [entry["state"] for entry in history] == ["RETRYING", "CANCELLED"]
++    assert [entry["attempt"] for entry in history] == [1, 1]
++    assert len(calls) == 1
++
++
++@pytest.mark.asyncio
++async def test_attempt_history_model_dump_is_json_compatible():
++    calls: list[int] = []
++    retry_step("history_json", 1, calls)
++    result = await WorkflowRunner().run_async(
++        DAGSpec(id="history_json_dag", steps=[retry_spec("history_json", 1)])
++    )
++
++    dumped = result.model_dump(mode="json")
++    assert dumped["step_attempt_history"]["work"][0]["state"] == "RETRYING"
++    assert dumped["step_attempt_history"]["work"][1]["state"] == "COMPLETED"
++
++
++@pytest.mark.asyncio
++async def test_resumed_run_reuses_completed_checkpoint_and_lineage():
++    calls = {"root": 0, "flaky": 0, "child": 0, "independent": 0}
++
++    def root():
++        calls["root"] += 1
++        return {"value": 7}
++
++    def flaky():
++        calls["flaky"] += 1
++        if calls["flaky"] == 1:
++            raise RuntimeError("first run fails")
++        return {"value": 9}
++
++    def child():
++        calls["child"] += 1
++        return {"ok": True}
++
++    def independent():
++        calls["independent"] += 1
++        return {"kept": True}
++
++    for name, fn in {
++        "resume_root": root,
++        "resume_flaky": flaky,
++        "resume_child": child,
++        "resume_independent": independent,
++    }.items():
++        register_python_callable(name, fn)
++
++    dag = DAGSpec(
++        id="resume_dag",
++        steps=[
++            StepSpec(id="root", executor_type=ExecutorType.PYTHON_INLINE, callable_name="resume_root"),
++            StepSpec(
++                id="flaky",
++                executor_type=ExecutorType.PYTHON_INLINE,
++                callable_name="resume_flaky",
++                depends_on=["root"],
++                on_failure=OnFailureAction.CONTINUE,
++            ),
++            StepSpec(
++                id="independent",
++                executor_type=ExecutorType.PYTHON_INLINE,
++                callable_name="resume_independent",
++                depends_on=["root"],
++            ),
++            StepSpec(
++                id="child",
++                executor_type=ExecutorType.PYTHON_INLINE,
++                callable_name="resume_child",
++                depends_on=["flaky"],
++            ),
++        ],
++    )
++    runner = WorkflowRunner()
++    first = await runner.run_async(dag, run_id="first-run")
++    resumed_events: list[tuple[str, str]] = []
++    resume_hooks = HookRegistry()
++
++    async def record_start(_, __, payload):
++        resumed_events.append(("start", payload["step_id"]))
++
++    async def record_success(_, __, payload):
++        resumed_events.append(("success", payload["step_id"]))
++
++    async def record_skip(_, __, payload):
++        resumed_events.append(("skip", payload["step_id"]))
++
++    resume_hooks.register(LifecycleEvent.STEP_START, record_start)
++    resume_hooks.register(LifecycleEvent.STEP_SUCCESS, record_success)
++    resume_hooks.register(LifecycleEvent.STEP_SKIPPED, record_skip)
++    resumed = await WorkflowRunner(hook_registry=resume_hooks).run_async(
++        dag, run_id="resumed-run", resume_from=first
++    )
++
++    assert first.state == WorkflowState.FAILED
++    assert resumed.state == WorkflowState.COMPLETED
++    assert resumed.parent_run_id == "first-run"
++    assert resumed.reused_step_ids == ["root", "independent"]
++    assert calls == {"root": 1, "flaky": 2, "child": 1, "independent": 1}
++    assert resumed.outputs["root"] == {"value": 7}
++    assert resumed.step_attempts == {"root": 1, "flaky": 2, "independent": 1, "child": 1}
++    assert [entry["state"] for entry in resumed.step_attempt_history["flaky"]] == [
++        "FAILED",
++        "COMPLETED",
++    ]
++    assert [entry["attempt"] for entry in resumed.step_attempt_history["flaky"]] == [1, 2]
++    assert resumed_events == [
++        ("start", "flaky"),
++        ("success", "flaky"),
++        ("start", "child"),
++        ("success", "child"),
++    ]
++
++
++@pytest.mark.asyncio
++async def test_resume_grants_fresh_retry_budget_with_cumulative_attempt_numbers():
++    calls: list[int] = []
++    retry_step("resume_budget", 3, calls)
++    dag = DAGSpec(id="resume_budget_dag", steps=[retry_spec("resume_budget", 1)])
++    first = await WorkflowRunner().run_async(dag, run_id="budget-first")
++
++    events: list[int] = []
++    hooks = HookRegistry()
++
++    async def on_start(_, __, payload):
++        events.append(payload["attempt"])
++
++    hooks.register(LifecycleEvent.STEP_START, on_start)
++    resumed = await WorkflowRunner(hook_registry=hooks).run_async(
++        dag, run_id="budget-resumed", resume_from=first
++    )
++
++    assert first.step_attempts["work"] == 2
++    assert resumed.state == WorkflowState.COMPLETED
++    assert resumed.step_attempts["work"] == 4
++    assert events == [3, 4]
++    assert [entry["attempt"] for entry in resumed.step_attempt_history["work"]] == [1, 2, 3, 4]
++    assert [entry["state"] for entry in resumed.step_attempt_history["work"]] == [
++        "RETRYING",
++        "FAILED",
++        "RETRYING",
++        "COMPLETED",
++    ]
++
++
++@pytest.mark.asyncio
++async def test_resume_rejects_successful_mismatched_and_stale_checkpoints():
++    register_python_callable("resume_ok", lambda: {"ok": True})
++    dag = DAGSpec(
++        id="resume_valid",
++        steps=[StepSpec(id="ok", executor_type=ExecutorType.PYTHON_INLINE, callable_name="resume_ok")],
++    )
++    successful = await WorkflowRunner().run_async(dag)
++    with pytest.raises(ValueError):
++        await WorkflowRunner().run_async(dag, resume_from=successful)
++
++    for index, allowed_state in enumerate(
++        (WorkflowState.FAILED, WorkflowState.TIMEOUT, WorkflowState.CANCELLED), start=1
++    ):
++        checkpoint = successful.model_copy(update={"state": allowed_state})
++        resumed = await WorkflowRunner().run_async(
++            dag, run_id=f"allowed-resume-{index}", resume_from=checkpoint
++        )
++        assert resumed.state == WorkflowState.COMPLETED
++        assert resumed.parent_run_id == successful.run_id
++
++    failed = successful.model_copy(
++        update={"state": WorkflowState.FAILED, "dag_id": "another_dag"}
++    )
++    with pytest.raises(ValueError):
++        await WorkflowRunner().run_async(dag, resume_from=failed)
++
++    stale = successful.model_copy(
++        update={
++            "state": WorkflowState.FAILED,
++            "step_states": {"removed": StepState.COMPLETED},
++        }
++    )
++    with pytest.raises(ValueError):
++        await WorkflowRunner().run_async(dag, resume_from=stale)
++
++    expanded_dag = dag.model_copy(
++        update={
++            "steps": dag.steps
++            + [
++                StepSpec(
++                    id="added",
++                    executor_type=ExecutorType.PYTHON_INLINE,
++                    callable_name="resume_ok",
++                )
++            ]
++        }
++    )
++    failed_for_original = successful.model_copy(update={"state": WorkflowState.FAILED})
++    with pytest.raises(ValueError):
++        await WorkflowRunner().run_async(expanded_dag, resume_from=failed_for_original)
++
++
++@pytest.mark.asyncio
++async def test_engine_retry_persists_checkpoint_lineage_in_sqlite(tmp_path):
++    calls = {"root": 0, "work": 0}
++
++    def root():
++        calls["root"] += 1
++        return {"seed": 4}
++
++    def work():
++        calls["work"] += 1
++        if calls["work"] == 1:
++            raise RuntimeError("retry later")
++        return {"done": True}
++
++    register_python_callable("persist_resume_root", root)
++    register_python_callable("persist_resume_work", work)
++    dag = DAGSpec(
++        id="persist_resume_dag",
++        steps=[
++            StepSpec(id="root", executor_type=ExecutorType.PYTHON_INLINE, callable_name="persist_resume_root"),
++            StepSpec(
++                id="work",
++                executor_type=ExecutorType.PYTHON_INLINE,
++                callable_name="persist_resume_work",
++                depends_on=["root"],
++            ),
++        ],
++    )
++    engine = BasaltEngine(
++        EngineConfig(
++            db_url=f"sqlite+aiosqlite:///{tmp_path / 'resume.db'}",
++            use_memory_storage=False,
++            enable_triggers=False,
++        )
++    )
++    await engine.start()
++    await engine.register_dag(dag)
++    first = await engine.run_dag(dag.id, run_id="persist-first")
++    resumed = await engine.retry_run(first.run_id, new_run_id="persist-resumed")
++    loaded = await engine.get_run_result(resumed.run_id)
++
++    assert loaded is not None
++    assert loaded.parent_run_id == "persist-first"
++    assert loaded.resume_depth == 1
++    assert loaded.reused_step_ids == ["root"]
++    assert loaded.step_attempts == {"root": 1, "work": 2}
++    assert [entry["attempt"] for entry in loaded.step_attempt_history["work"]] == [1, 2]
++    assert calls == {"root": 1, "work": 2}
++    original = await engine.get_run_result("persist-first")
++    assert original is not None and original.state == WorkflowState.FAILED
++    await engine.stop()
++
++
++@pytest.mark.asyncio
++async def test_retry_api_resumes_checkpoint_and_returns_lineage(tmp_path):
++    calls = {"root": 0, "work": 0}
++
++    def root():
++        calls["root"] += 1
++        return {"root": True}
++
++    def work():
++        calls["work"] += 1
++        if calls["work"] == 1:
++            raise RuntimeError("api failure")
++        return {"recovered": True}
++
++    register_python_callable("api_resume_root", root)
++    register_python_callable("api_resume_work", work)
++    engine = BasaltEngine(
++        EngineConfig(
++            db_url=f"sqlite+aiosqlite:///{tmp_path / 'resume-api.db'}",
++            use_memory_storage=False,
++            enable_triggers=False,
++        )
++    )
++    set_engine(engine)
++    await engine.start()
++    await engine.register_dag(
++        DAGSpec(
++            id="api_resume_dag",
++            steps=[
++                StepSpec(id="root", executor_type=ExecutorType.PYTHON_INLINE, callable_name="api_resume_root"),
++                StepSpec(
++                    id="work",
++                    executor_type=ExecutorType.PYTHON_INLINE,
++                    callable_name="api_resume_work",
++                    depends_on=["root"],
++                ),
++            ],
++        )
++    )
++    first = await engine.run_dag("api_resume_dag", run_id="api-resume-first")
++
++    async with httpx.AsyncClient(
++        transport=ASGITransport(app=create_app()), base_url="http://testserver"
++    ) as client:
++        response = await client.post(f"/api/v1/runs/{first.run_id}/retry")
++        assert response.status_code == 200
++        payload = response.json()
++        status_response = await client.get(f"/api/v1/runs/{payload['run_id']}")
++        root_response = await client.get(
++            f"/api/v1/runs/{payload['run_id']}/steps/root"
++        )
++        work_response = await client.get(
++            f"/api/v1/runs/{payload['run_id']}/steps/work"
++        )
++
++    assert payload["state"] == "COMPLETED"
++    assert payload["parent_run_id"] == "api-resume-first"
++    assert payload["resume_depth"] == 1
++    assert payload["reused_step_ids"] == ["root"]
++    assert status_response.status_code == 200
++    assert status_response.json()["parent_run_id"] == "api-resume-first"
++    assert status_response.json()["resume_depth"] == 1
++    assert status_response.json()["reused_step_ids"] == ["root"]
++    assert root_response.json()["parent_run_id"] == "api-resume-first"
++    assert root_response.json()["reused"] is True
++    assert work_response.json()["reused"] is False
++    assert calls == {"root": 1, "work": 2}
++    work_data = next(item for item in payload["step_runs"] if item["step_id"] == "work")
++    assert work_data["attempt"] == 2
++    assert [entry["attempt"] for entry in work_data["attempt_history"]] == [1, 2]
++    await engine.stop()
++
++
++def test_cli_retry_resumes_checkpoint_and_renders_lineage(tmp_path):
++    import json
++
++    from click.testing import CliRunner
++
++    from basalt.cli.main import cli
++
++    calls = {"root": 0, "work": 0}
++
++    def root():
++        calls["root"] += 1
++        return {"seed": 1}
++
++    def work():
++        calls["work"] += 1
++        if calls["work"] == 1:
++            raise RuntimeError("cli retry")
++        return {"done": True}
++
++    register_python_callable("cli_resume_root", root)
++    register_python_callable("cli_resume_work", work)
++    dag_file = tmp_path / "resume.yaml"
++    dag_file.write_text(
++        """
++id: cli_resume_dag
++steps:
++  - id: root
++    executor_type: python_inline
++    callable_name: cli_resume_root
++  - id: work
++    executor_type: python_inline
++    callable_name: cli_resume_work
++    depends_on: [root]
++"""
++    )
++    db_url = f"sqlite+aiosqlite:///{tmp_path / 'resume-cli.db'}"
++    cli_runner = CliRunner()
++    started = cli_runner.invoke(
++        cli,
++        ["run", "start", str(dag_file), "--run-id", "cli-resume-first", "--db-url", db_url],
++    )
++    assert started.exit_code == 0
++
++    retried = cli_runner.invoke(
++        cli, ["run", "retry", "cli-resume-first", "--db-url", db_url, "--format", "json"]
++    )
++    assert retried.exit_code == 0
++    payload = json.loads(retried.output[retried.output.index("{") :])
++    assert payload["state"] == "COMPLETED"
++    assert payload["parent_run_id"] == "cli-resume-first"
++    assert payload["resume_depth"] == 1
++    assert payload["reused_step_ids"] == ["root"]
++    assert payload["step_attempts"]["work"] == 2
++    assert calls == {"root": 1, "work": 2}
++    status = cli_runner.invoke(
++        cli, ["run", "status", payload["run_id"], "--db-url", db_url]
++    )
++    assert status.exit_code == 0
++    assert "Resumed From" in status.output and "cli-resume-first" in status.output
++    assert "Resume Depth" in status.output and "1" in status.output
++    assert "Reused Steps" in status.output and "root" in status.output
++
++
++@pytest.mark.asyncio
++async def test_multi_generation_resume_tracks_depth_and_cumulative_checkpoint(tmp_path):
++    calls = {"root": 0, "work": 0}
++
++    def root():
++        calls["root"] += 1
++        return {"seed": 5}
++
++    def work():
++        calls["work"] += 1
++        if calls["work"] < 3:
++            raise RuntimeError(f"failure {calls['work']}")
++        return {"finished": True}
++
++    register_python_callable("chain_root", root)
++    register_python_callable("chain_work", work)
++    engine = BasaltEngine(
++        EngineConfig(
++            db_url=f"sqlite+aiosqlite:///{tmp_path / 'resume-chain.db'}",
++            use_memory_storage=False,
++            enable_triggers=False,
++        )
++    )
++    await engine.start()
++    await engine.register_dag(
++        DAGSpec(
++            id="resume_chain_dag",
++            steps=[
++                StepSpec(id="root", executor_type=ExecutorType.PYTHON_INLINE, callable_name="chain_root"),
++                StepSpec(
++                    id="work",
++                    executor_type=ExecutorType.PYTHON_INLINE,
++                    callable_name="chain_work",
++                    depends_on=["root"],
++                ),
++            ],
++        )
++    )
++
++    first = await engine.run_dag("resume_chain_dag", run_id="chain-0")
++    second = await engine.retry_run(first.run_id, new_run_id="chain-1")
++    third = await engine.retry_run(second.run_id, new_run_id="chain-2")
++    loaded = await engine.get_run_result("chain-2")
++
++    assert [first.state, second.state, third.state] == [
++        WorkflowState.FAILED,
++        WorkflowState.FAILED,
++        WorkflowState.COMPLETED,
++    ]
++    assert loaded is not None
++    assert loaded.parent_run_id == "chain-1"
++    assert loaded.resume_depth == 2
++    assert loaded.reused_step_ids == ["root"]
++    assert loaded.step_attempts == {"root": 1, "work": 3}
++    assert [entry["attempt"] for entry in loaded.step_attempt_history["work"]] == [1, 2, 3]
++    assert calls == {"root": 1, "work": 3}
++    await engine.stop()

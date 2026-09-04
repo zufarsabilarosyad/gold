@@ -1,13 +1,14 @@
 diff --git a/src/basalt/api/router_runs.py b/src/basalt/api/router_runs.py
-index 5338140..2a7fba5 100644
+index 5338140..1db09d3 100644
 --- a/src/basalt/api/router_runs.py
 +++ b/src/basalt/api/router_runs.py
-@@ -40,11 +40,13 @@ def _to_run_status_response(result: WorkflowRunResult) -> RunStatusResponse:
+@@ -40,11 +40,14 @@ def _to_run_status_response(result: WorkflowRunResult) -> RunStatusResponse:
          StepRunResponse(
              step_id=step_id,
              state=state,
 +            attempt=result.step_attempts.get(step_id, 1),
              output=result.outputs.get(step_id),
++            attempt_history=result.step_attempt_history.get(step_id, []),
          )
          for step_id, state in result.step_states.items()
      ]
@@ -16,11 +17,25 @@ index 5338140..2a7fba5 100644
      return RunStatusResponse(
          run_id=result.run_id,
          dag_id=result.dag_id,
-@@ -204,10 +206,12 @@ async def get_step_run_output(
+@@ -55,6 +58,9 @@ def _to_run_status_response(result: WorkflowRunResult) -> RunStatusResponse:
+         inputs=result.inputs or {},
+         outputs=result.outputs or {},
+         step_runs=step_runs,
++        parent_run_id=result.parent_run_id,
++        resume_depth=result.resume_depth,
++        reused_step_ids=result.reused_step_ids,
+         error_message=result.error_message,
+     )
+ 
+@@ -204,10 +210,16 @@ async def get_step_run_output(
          "dag_id": result.dag_id,
          "step_id": step_id,
          "state": result.step_states[step_id].value,
 +        "attempt": result.step_attempts.get(step_id, 1),
++        "attempt_history": result.step_attempt_history.get(step_id, []),
++        "parent_run_id": result.parent_run_id,
++        "resume_depth": result.resume_depth,
++        "reused": step_id in result.reused_step_ids,
          "output": result.outputs.get(step_id),
      }
  
@@ -29,26 +44,88 @@ index 5338140..2a7fba5 100644
  @router.post(
      "/runs/{run_id}/cancel",
      status_code=status.HTTP_200_OK,
+@@ -273,10 +285,7 @@ async def retry_failed_run(
+         )
+ 
+     logger.info(f"API retrying failed workflow run '{run_id}' for DAG '{original_run.dag_id}'")
+-    new_result = await engine.run_dag(
+-        dag_id_or_spec=original_run.dag_id,
+-        inputs=original_run.inputs,
+-    )
++    new_result = await engine.retry_run(run_id)
+     return _to_run_status_response(new_result)
+ 
+ 
+diff --git a/src/basalt/api/schemas.py b/src/basalt/api/schemas.py
+index 3f93460..3664d1b 100644
+--- a/src/basalt/api/schemas.py
++++ b/src/basalt/api/schemas.py
+@@ -111,6 +111,10 @@ class StepRunResponse(BaseModel):
+     end_time: datetime | None = Field(None, description="Step completion timestamp.")
+     duration_ms: float | None = Field(None, description="Execution duration in milliseconds.")
+     output: Any | None = Field(None, description="Returned output payload.")
++    attempt_history: list[dict[str, Any]] = Field(
++        default_factory=list,
++        description="Ordered outcomes for each execution attempt.",
++    )
+     error_message: str | None = Field(None, description="Error trace message if step failed.")
+ 
+ 
+@@ -130,6 +134,11 @@ class RunStatusResponse(BaseModel):
+         description="Detailed step execution records.",
+     )
+     error_message: str | None = Field(None, description="Failure reason message.")
++    parent_run_id: str | None = Field(None, description="Checkpoint source run, when resumed.")
++    resume_depth: int = Field(default=0, description="Number of checkpoint resumes in the lineage.")
++    reused_step_ids: list[str] = Field(
++        default_factory=list, description="Completed steps reused from the source run."
++    )
+ 
+ 
+ class BatchRunStatusResponse(BaseModel):
 diff --git a/src/basalt/cli/commands_run.py b/src/basalt/cli/commands_run.py
-index 257d31f..3a766e4 100644
+index 257d31f..9d1efd3 100644
 --- a/src/basalt/cli/commands_run.py
 +++ b/src/basalt/cli/commands_run.py
-@@ -180,8 +180,10 @@ def get_step_output_cmd(run_id: str, step_id: str, db_url: str | None, output_fo
+@@ -180,8 +180,14 @@ def get_step_output_cmd(run_id: str, step_id: str, db_url: str | None, output_fo
                  "dag_id": result.dag_id,
                  "step_id": step_id,
                  "state": result.step_states[step_id].value,
 +                "attempt": result.step_attempts.get(step_id, 1),
++                "attempt_history": result.step_attempt_history.get(step_id, []),
++                "parent_run_id": result.parent_run_id,
++                "resume_depth": result.resume_depth,
++                "reused": step_id in result.reused_step_ids,
                  "output": result.outputs.get(step_id),
              }
 +
              click.echo(CLIFormatter.format_json(step_data))
  
      try:
+@@ -309,7 +315,7 @@ def retry_run_cmd(run_id: str, db_url: str | None, output_format: str) -> None:
+                 raise click.Abort()
+ 
+             click.echo(f"Retrying failed run '{run_id}' for DAG '{original.dag_id}'...")
+-            new_result = await engine.run_dag(original.dag_id, inputs=original.inputs)
++            new_result = await engine.retry_run(run_id)
+             click.echo(CLIFormatter.format_run_result(new_result, output_format=fmt))
+ 
+     try:
 diff --git a/src/basalt/cli/formatter.py b/src/basalt/cli/formatter.py
-index 9f3c4eb..8fce120 100644
+index 9f3c4eb..81535ca 100644
 --- a/src/basalt/cli/formatter.py
 +++ b/src/basalt/cli/formatter.py
-@@ -175,14 +175,16 @@ class CLIFormatter:
+@@ -163,6 +163,9 @@ class CLIFormatter:
+             ["Run ID", result.run_id],
+             ["DAG ID", result.dag_id],
+             ["State", result.state.value.upper()],
++            ["Resumed From", result.parent_run_id or "-"],
++            ["Resume Depth", result.resume_depth],
++            ["Reused Steps", ", ".join(result.reused_step_ids) or "-"],
+             ["Duration (ms)", f"{result.duration_ms:.2f}"],
+             ["Start Time", result.start_time.strftime("%Y-%m-%d %H:%M:%S UTC")],
+             [
+@@ -175,14 +178,16 @@ class CLIFormatter:
          summary_table = cls.format_table(headers, rows, title=f"Run Result: {result.run_id}")
  
          # Render step states table
@@ -90,10 +167,18 @@ index 8a3ce1f..e10675a 100644
  class StepSpec(BaseModel):
      """Specification schema for an individual workflow task step."""
 diff --git a/src/basalt/core/engine/context.py b/src/basalt/core/engine/context.py
-index 6fedc2b..0a0c957 100644
+index 6fedc2b..6658cc6 100644
 --- a/src/basalt/core/engine/context.py
 +++ b/src/basalt/core/engine/context.py
-@@ -80,6 +80,53 @@ class ExecutionContext:
+@@ -35,6 +35,7 @@ class ExecutionContext:
+         self._step_outputs: dict[str, dict[str, Any]] = {}
+         self._step_states: dict[str, StepState] = {}
+         self._step_records: dict[str, StepExecutionRecord] = {}
++        self._step_attempt_history: dict[str, list[dict[str, Any]]] = {}
+ 
+     def set_input(self, key: str, value: Any) -> None:
+         """Store or update a workflow input parameter.
+@@ -80,6 +81,100 @@ class ExecutionContext:
              else:
                  self._step_records[step_id].state = state
  
@@ -132,7 +217,36 @@ index 6fedc2b..0a0c957 100644
 +        """Retrieve execution attempt count recorded for a step."""
 +        with self._lock:
 +            record = self._step_records.get(step_id)
-+            return record.attempt if record is not None else 1
++            return record.attempt if record is not None else 0
++
++    def restore_completed_step(
++        self,
++        step_id: str,
++        output: dict[str, Any],
++        attempts: int,
++        history: list[dict[str, Any]],
++    ) -> None:
++        """Restore a completed checkpoint without treating it as a new execution."""
++        with self._lock:
++            self._step_states[step_id] = StepState.COMPLETED
++            self._step_outputs[step_id] = output.copy()
++            self._step_records[step_id] = StepExecutionRecord(
++                step_id=step_id,
++                state=StepState.COMPLETED,
++                attempt=attempts,
++                output_data=output.copy(),
++            )
++            self._step_attempt_history[step_id] = [entry.copy() for entry in history]
++
++    def restore_attempt_checkpoint(
++        self, step_id: str, attempts: int, history: list[dict[str, Any]]
++    ) -> None:
++        """Restore counters for a step that must execute again during a resumed run."""
++        with self._lock:
++            self._step_records[step_id] = StepExecutionRecord(
++                step_id=step_id, state=StepState.PENDING, attempt=attempts
++            )
++            self._step_attempt_history[step_id] = [entry.copy() for entry in history]
 +
 +    def step_attempts(self) -> dict[str, int]:
 +        """Return completed or in-flight attempt counts by step ID."""
@@ -143,16 +257,100 @@ index 6fedc2b..0a0c957 100644
 +        """Return snapshot dictionary mapping all step IDs to their attempt counts."""
 +        return self.step_attempts()
 +
++    def set_step_attempt_history(self, step_id: str, history: list[dict[str, Any]]) -> None:
++        """Store an isolated snapshot of a step's ordered attempt outcomes."""
++        with self._lock:
++            self._step_attempt_history[step_id] = [entry.copy() for entry in history]
++
++    def get_step_attempt_history(self, step_id: str) -> list[dict[str, Any]]:
++        """Return a copy of one step's attempt history."""
++        with self._lock:
++            return [entry.copy() for entry in self._step_attempt_history.get(step_id, [])]
++
++    def get_all_step_attempt_history(self) -> dict[str, list[dict[str, Any]]]:
++        """Return attempt histories for every step that started execution."""
++        with self._lock:
++            return {
++                step_id: [entry.copy() for entry in history]
++                for step_id, history in self._step_attempt_history.items()
++            }
++
 +
      def get_step_state(self, step_id: str) -> StepState:
          """Retrieve active state for a step.
  
+diff --git a/src/basalt/core/engine/engine.py b/src/basalt/core/engine/engine.py
+index 13c3bfb..e2ba238 100644
+--- a/src/basalt/core/engine/engine.py
++++ b/src/basalt/core/engine/engine.py
+@@ -227,6 +227,7 @@ class BasaltEngine:
+         dag_id_or_spec: str | DAGSpec,
+         inputs: dict[str, Any] | None = None,
+         run_id: str | None = None,
++        resume_from: WorkflowRunResult | None = None,
+     ) -> WorkflowRunResult:
+         """Execute a workflow DAG and record run result ledger in repository.
+ 
+@@ -253,10 +254,21 @@ class BasaltEngine:
+ 
+         # Create pending run record in database
+         if self.repository:
+-            await self.repository.create_run(dag_id=dag.id, run_id=active_run_id, inputs=inputs)
++            await self.repository.create_run(
++                dag_id=dag.id,
++                run_id=active_run_id,
++                inputs=inputs,
++                parent_run_id=resume_from.run_id if resume_from else None,
++                resume_depth=(resume_from.resume_depth + 1) if resume_from else 0,
++            )
+ 
+         # Run DAG through WorkflowRunner
+-        result = await self.runner.run_async(dag=dag, inputs=inputs, run_id=active_run_id)
++        result = await self.runner.run_async(
++            dag=dag,
++            inputs=inputs,
++            run_id=active_run_id,
++            resume_from=resume_from,
++        )
+ 
+         # Save run result snapshot
+         if self.repository:
+@@ -269,6 +281,29 @@ class BasaltEngine:
+         )
+         return result
+ 
++    async def retry_run(
++        self, run_id: str, new_run_id: str | None = None
++    ) -> WorkflowRunResult:
++        """Resume a terminal unsuccessful run from its completed-step checkpoint."""
++        original = await self.get_run_result(run_id)
++        if original is None:
++            raise BasaltError(message=f"Run '{run_id}' was not found.", code="RUN_NOT_FOUND")
++        if original.state not in {
++            WorkflowState.FAILED,
++            WorkflowState.TIMEOUT,
++            WorkflowState.CANCELLED,
++        }:
++            raise BasaltError(
++                message=f"Run '{run_id}' cannot be resumed from state '{original.state.value}'.",
++                code="INVALID_RUN_STATE_FOR_RETRY",
++            )
++        return await self.run_dag(
++            original.dag_id,
++            inputs=original.inputs,
++            run_id=new_run_id,
++            resume_from=original,
++        )
++
+     async def get_run_result(self, run_id: str) -> WorkflowRunResult | None:
+         """Fetch execution run result log by run ID."""
+         if self.repository:
 diff --git a/src/basalt/core/engine/retry_control.py b/src/basalt/core/engine/retry_control.py
 new file mode 100644
-index 0000000..7cefdda
+index 0000000..15d0b50
 --- /dev/null
 +++ b/src/basalt/core/engine/retry_control.py
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,293 @@
 +"""Reusable policy control for retryable workflow step execution.
 +
 +The runner owns DAG ordering; this module owns the state machine that
@@ -224,13 +422,12 @@ index 0000000..7cefdda
 +    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 +
 +    def to_dict(self) -> dict[str, Any]:
-+        """Serialize audit record to dictionary."""
++        """Serialize the stable public attempt-history shape."""
 +        return {
 +            "attempt": self.attempt,
 +            "state": self.state.value,
 +            "delay_seconds": self.delay_seconds,
-+            "error_message": self.error_message,
-+            "timestamp": self.timestamp.isoformat(),
++            "error": self.error_message,
 +        }
 +
 +
@@ -448,7 +645,7 @@ index 0000000..7cefdda
 +
 +        return StepState.FAILED, {}, "Retry controller exhausted unexpectedly."
 diff --git a/src/basalt/core/engine/runner.py b/src/basalt/core/engine/runner.py
-index e0857a4..0ebf167 100644
+index e0857a4..5377b40 100644
 --- a/src/basalt/core/engine/runner.py
 +++ b/src/basalt/core/engine/runner.py
 @@ -11,9 +11,11 @@ from typing import Any
@@ -464,18 +661,86 @@ index e0857a4..0ebf167 100644
  from basalt.core.engine.context import ExecutionContext
  from basalt.core.engine.evaluator import ExpressionEvaluator
  from basalt.core.engine.hooks import HookRegistry, LifecycleEvent, get_hook_registry
-@@ -37,8 +39,10 @@ class WorkflowRunResult(BaseModel):
+@@ -37,8 +39,14 @@ class WorkflowRunResult(BaseModel):
      inputs: dict[str, Any] = Field(default_factory=dict)
      outputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
      step_states: dict[str, StepState] = Field(default_factory=dict)
 +    step_attempts: dict[str, int] = Field(default_factory=dict)
++    step_attempt_history: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
++    parent_run_id: str | None = None
++    resume_depth: int = 0
++    reused_step_ids: list[str] = Field(default_factory=list)
      error_message: str | None = None
  
 +
      def is_success(self) -> bool:
          """Check if workflow finished in COMPLETED state."""
          return self.state == WorkflowState.COMPLETED
-@@ -180,29 +184,27 @@ class WorkflowRunner:
+@@ -92,6 +100,7 @@ class WorkflowRunner:
+         inputs: dict[str, Any] | None = None,
+         env: dict[str, str] | None = None,
+         run_id: str | None = None,
++        resume_from: WorkflowRunResult | None = None,
+     ) -> WorkflowRunResult:
+         """Asynchronously execute a DAG workflow from start to finish.
+ 
+@@ -104,8 +113,21 @@ class WorkflowRunner:
+         Returns:
+             WorkflowRunResult snapshot container.
+         """
+-        # Validate structural integrity
++        # Validate structural integrity and optional checkpoint lineage.
+         self.validate_dag(dag)
++        if resume_from is not None:
++            if resume_from.dag_id != dag.id:
++                raise ValueError("Cannot resume a run with a different DAG.")
++            if resume_from.state not in {
++                WorkflowState.FAILED,
++                WorkflowState.CANCELLED,
++                WorkflowState.TIMEOUT,
++            }:
++                raise ValueError("Only failed, cancelled, or timed-out runs can be resumed.")
++            checkpoint_step_ids = set(resume_from.step_states)
++            current_step_ids = {step.id for step in dag.steps}
++            if checkpoint_step_ids != current_step_ids:
++                raise ValueError("Checkpoint step IDs do not match the current DAG.")
+ 
+         active_run_id = run_id or generate_run_id()
+         cancel_event = asyncio.Event()
+@@ -119,6 +141,23 @@ class WorkflowRunner:
+             inputs=inputs,
+             env=env,
+         )
++        reused_step_ids: list[str] = []
++        if resume_from is not None:
++            for step_id, state in resume_from.step_states.items():
++                if state == StepState.COMPLETED:
++                    context.restore_completed_step(
++                        step_id,
++                        resume_from.outputs.get(step_id, {}),
++                        resume_from.step_attempts.get(step_id, 1),
++                        resume_from.step_attempt_history.get(step_id, []),
++                    )
++                    reused_step_ids.append(step_id)
++                elif state in {StepState.FAILED, StepState.CANCELLED, StepState.TIMEOUT}:
++                    context.restore_attempt_checkpoint(
++                        step_id,
++                        resume_from.step_attempts[step_id],
++                        resume_from.step_attempt_history.get(step_id, []),
++                    )
+ 
+         logger.info(
+             f"Starting workflow run '{active_run_id}' for DAG '{dag.id}' with {len(dag.steps)} steps."
+@@ -153,6 +192,8 @@ class WorkflowRunner:
+                 runnable_steps: list[StepSpec] = []
+ 
+                 for step in level_steps:
++                    if context.is_step_completed(step.id):
++                        continue
+                     # Check upstream dependency states
+                     if self._should_skip_due_to_upstream(step, context):
+                         logger.info(f"Skipping step '{step.id}' due to upstream failure/skip.")
+@@ -180,29 +221,27 @@ class WorkflowRunner:
                  if not runnable_steps:
                      continue
  
@@ -513,7 +778,7 @@ index e0857a4..0ebf167 100644
                      else:
                          level_failed = True
                          if not error_message:
-@@ -210,11 +212,12 @@ class WorkflowRunner:
+@@ -210,11 +249,12 @@ class WorkflowRunner:
                          await self.hook_registry.trigger(
                              LifecycleEvent.STEP_FAILURE,
                              context,
@@ -529,7 +794,7 @@ index e0857a4..0ebf167 100644
                      logger.warning(
                          f"Level execution failed in run '{active_run_id}'. Aborting downstream steps."
                      )
-@@ -222,6 +225,9 @@ class WorkflowRunner:
+@@ -222,6 +262,9 @@ class WorkflowRunner:
                          for rem_step in rem_level:
                              if context.get_step_state(rem_step.id) == StepState.PENDING:
                                  context.set_step_state(rem_step.id, StepState.SKIPPED)
@@ -539,7 +804,7 @@ index e0857a4..0ebf167 100644
                      break
  
              # Aggregate final workflow state
-@@ -229,6 +235,7 @@ class WorkflowRunner:
+@@ -229,6 +272,7 @@ class WorkflowRunner:
                  all_states = context.get_all_step_states()
                  workflow_state = StateMachine.aggregate_workflow_state(all_states)
  
@@ -547,11 +812,15 @@ index e0857a4..0ebf167 100644
          except Exception as exc:
              logger.error(
                  f"Workflow execution pipeline crashed for run '{active_run_id}': {exc}",
-@@ -267,9 +274,49 @@ class WorkflowRunner:
+@@ -267,9 +311,64 @@ class WorkflowRunner:
              inputs=context.inputs.copy(),
              outputs=context.get_all_step_outputs(),
              step_states=context.get_all_step_states(),
 +            step_attempts=context.step_attempts(),
++            step_attempt_history=context.get_all_step_attempt_history(),
++            parent_run_id=resume_from.run_id if resume_from else None,
++            resume_depth=(resume_from.resume_depth + 1) if resume_from else 0,
++            reused_step_ids=reused_step_ids,
              error_message=error_message,
          )
  
@@ -571,6 +840,8 @@ index e0857a4..0ebf167 100644
 +        policy = step.retry_policy
 +        retries = policy.max_retries if policy and step.on_failure == OnFailureAction.RETRY else 0
 +        controller = RetryController(RetrySchedule(policy, retries > 0), cancel_event)
++        base_attempt = context.get_step_attempt(step.id)
++        previous_history = context.get_step_attempt_history(step.id)
 +
 +        async def execute_attempt() -> tuple[StepState, dict[str, Any], str | None]:
 +            attempt = context.begin_attempt(step.id, retries)
@@ -585,10 +856,19 @@ index e0857a4..0ebf167 100644
 +            await self.hook_registry.trigger(
 +                LifecycleEvent.STEP_RETRY,
 +                context,
-+                {"step_id": step.id, "attempt": attempt, "error": error, "delay_seconds": delay},
++                {
++                    "step_id": step.id,
++                    "attempt": base_attempt + attempt,
++                    "error": error,
++                    "delay_seconds": delay,
++                },
 +            )
 +
 +        result = await controller.run(execute_attempt, announce_retry)
++        new_history = controller.get_audit_trail()
++        for entry in new_history:
++            entry["attempt"] += base_attempt
++        context.set_step_attempt_history(step.id, previous_history + new_history)
 +        if result[0] == StepState.CANCELLED:
 +            context.set_step_state(step.id, StepState.CANCELLED)
 +        return result
@@ -848,11 +1128,80 @@ index 575e706..e1b9e88 100644
      @staticmethod
      def execute_sync_with_retry(
          sync_fn: Callable[[], T],
+diff --git a/src/basalt/storage/models.py b/src/basalt/storage/models.py
+index fe25f56..0619cd8 100644
+--- a/src/basalt/storage/models.py
++++ b/src/basalt/storage/models.py
+@@ -107,6 +107,9 @@ class DAGRunModel(Base):
+     inputs_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+     outputs_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
++    parent_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
++    resume_depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
++    reused_step_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+ 
+     # Relationships
+     dag: Mapped["DAGModel"] = relationship("DAGModel", back_populates="runs")
+@@ -157,6 +160,9 @@ class DAGRunModel(Base):
+             "inputs": self.inputs,
+             "outputs": self.outputs,
+             "error_message": self.error_message,
++            "parent_run_id": self.parent_run_id,
++            "resume_depth": self.resume_depth,
++            "reused_step_ids": json.loads(self.reused_step_ids_json or "[]"),
+         }
+ 
+ 
+@@ -175,6 +181,7 @@ class StepRunModel(Base):
+     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+     end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+     output_json: Mapped[str | None] = mapped_column(Text, nullable=True)
++    attempt_history_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+ 
+     # Relationships
+@@ -211,6 +218,7 @@ class StepRunModel(Base):
+             "start_time": self.start_time.isoformat() if self.start_time else None,
+             "end_time": self.end_time.isoformat() if self.end_time else None,
+             "output": self.output,
++            "attempt_history": json.loads(self.attempt_history_json or "[]"),
+             "error_message": self.error_message,
+         }
+ 
 diff --git a/src/basalt/storage/repository.py b/src/basalt/storage/repository.py
-index ea7bc51..bb87b3b 100644
+index ea7bc51..7f2e06e 100644
 --- a/src/basalt/storage/repository.py
 +++ b/src/basalt/storage/repository.py
-@@ -197,11 +197,12 @@ class BasaltRepository:
+@@ -148,6 +148,8 @@ class BasaltRepository:
+         dag_id: str,
+         run_id: str | None = None,
+         inputs: dict[str, Any] | None = None,
++        parent_run_id: str | None = None,
++        resume_depth: int = 0,
+     ) -> DAGRunModel:
+         """Create a new pending workflow execution run record."""
+         await self.initialize()
+@@ -163,6 +165,9 @@ class BasaltRepository:
+                 start_time=now,
+                 inputs_json=json_dumps(inputs or {}),
+                 outputs_json="{}",
++                parent_run_id=parent_run_id,
++                resume_depth=resume_depth,
++                reused_step_ids_json="[]",
+             )
+             session.add(run_model)
+             logger.info(f"Created workflow run record '{active_run_id}' for DAG '{dag_id}'")
+@@ -185,6 +190,9 @@ class BasaltRepository:
+                 existing.inputs_json = json_dumps(result.inputs)
+                 existing.outputs_json = json_dumps(result.outputs)
+                 existing.error_message = result.error_message
++                existing.parent_run_id = result.parent_run_id
++                existing.resume_depth = result.resume_depth
++                existing.reused_step_ids_json = json_dumps(result.reused_step_ids)
+ 
+                 # Update step runs
+                 await session.execute(
+@@ -197,11 +205,15 @@ class BasaltRepository:
                          run_id=result.run_id,
                          step_id=step_id,
                          state=st_val,
@@ -861,16 +1210,29 @@ index ea7bc51..bb87b3b 100644
                          start_time=result.start_time,
                          end_time=result.end_time,
                          output_json=json_dumps(step_output) if step_output is not None else None,
++                        attempt_history_json=json_dumps(
++                            result.step_attempt_history.get(step_id, [])
++                        ),
                      )
 +
                      session.add(step_model)
              else:
                  run_orm = ModelSerializer.run_result_to_orm(result)
 diff --git a/src/basalt/storage/serializers.py b/src/basalt/storage/serializers.py
-index 8fa6c49..68782a3 100644
+index 8fa6c49..226bc3a 100644
 --- a/src/basalt/storage/serializers.py
 +++ b/src/basalt/storage/serializers.py
-@@ -101,7 +101,7 @@ class ModelSerializer:
+@@ -91,6 +91,9 @@ class ModelSerializer:
+             inputs_json=json_dumps(result.inputs),
+             outputs_json=json_dumps(result.outputs),
+             error_message=result.error_message,
++            parent_run_id=result.parent_run_id,
++            resume_depth=result.resume_depth,
++            reused_step_ids_json=json_dumps(result.reused_step_ids),
+         )
+ 
+         # Convert step states into child StepRunModel records
+@@ -101,10 +104,11 @@ class ModelSerializer:
                  run_id=result.run_id,
                  step_id=step_id,
                  state=state_val,
@@ -879,23 +1241,34 @@ index 8fa6c49..68782a3 100644
                  start_time=result.start_time,
                  end_time=result.end_time,
                  output_json=json_dumps(step_output) if step_output is not None else None,
-@@ -117,9 +117,11 @@ class ModelSerializer:
++                attempt_history_json=json_dumps(result.step_attempt_history.get(step_id, [])),
+             )
+             run_model.step_runs.append(step_model)
+ 
+@@ -117,9 +121,14 @@ class ModelSerializer:
          outputs_dict = json_loads(model.outputs_json)
  
          step_states_dict: dict[str, StepState] = {}
 +        step_attempts_dict: dict[str, int] = {}
++        step_attempt_history_dict: dict[str, list[dict[str, Any]]] = {}
          for step_run in model.step_runs:
              try:
                  step_states_dict[step_run.step_id] = StepState(step_run.state)
 +                step_attempts_dict[step_run.step_id] = step_run.attempt
++                history = json_loads(step_run.attempt_history_json)
++                step_attempt_history_dict[step_run.step_id] = history if isinstance(history, list) else []
              except ValueError:
                  step_states_dict[step_run.step_id] = StepState.FAILED
  
-@@ -142,9 +144,11 @@ class ModelSerializer:
+@@ -142,9 +151,15 @@ class ModelSerializer:
              inputs=inputs_dict,
              outputs=outputs_dict,
              step_states=step_states_dict,
 +            step_attempts=step_attempts_dict,
++            step_attempt_history=step_attempt_history_dict,
++            parent_run_id=model.parent_run_id,
++            resume_depth=model.resume_depth,
++            reused_step_ids=json_loads(model.reused_step_ids_json),
              error_message=model.error_message,
          )
  
