@@ -55,10 +55,10 @@ index 0861b14..794f99f 100644
          self.register(LifecycleEvent.STEP_SKIPPED, callback)
 diff --git a/src/basalt/core/engine/memoization.py b/src/basalt/core/engine/memoization.py
 new file mode 100644
-index 0000000..bbeb411
+index 0000000..c5cb2e3
 --- /dev/null
 +++ b/src/basalt/core/engine/memoization.py
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,178 @@
 +"""Small, concurrency-safe result cache used by :class:`WorkflowRunner`.
 +
 +The cache deliberately stores only JSON-like successful executor outputs.  It is
@@ -152,6 +152,21 @@ index 0000000..bbeb411
 +    Entries are copied at both boundaries so a consumer cannot mutate a cached
 +    value seen by another workflow.  The async lock also makes cache access
 +    safe when one runner processes several workflow runs concurrently.
++
++    The cache intentionally has process-local lifetime. Applications choose
++    whether to keep one cache per runner or share it between runner instances.
++    Only successful workflow results are inserted by ``WorkflowRunner``.
++
++    ``get`` records either a hit or miss and treats expired entries as misses.
++    ``put`` replaces an existing key atomically. ``invalidate`` and ``clear``
++    make manual cache invalidation possible without exposing internal values.
++    ``keys`` and ``stats`` provide lightweight operational visibility.
++
++    No cache method returns its internally stored dictionary. This protects
++    later workflow runs from mutation performed by an earlier consumer, even
++    when outputs contain nested dictionaries or lists. The implementation is
++    deliberately small so an alternative durable cache can follow the same
++    observable contract in the future.
 +    """
 +
 +    def __init__(self) -> None:

@@ -1,26 +1,9 @@
-Add step memoization and cache administration.
+Basalt currently executes every workflow step on every run, even when deterministic work has already completed with the same inputs. Add opt-in result memoization without changing existing workflows.
 
-In `basalt.core.dag.ast`:
-- `MemoizationPolicySpec(BaseModel)`: `enabled: bool = False`, `key: str | None = None`, `ttl_seconds: float | None = Field(default=None, gt=0.0)`, `include_inputs: bool = True`.
-- `StepSpec`: `memoization: MemoizationPolicySpec = Field(default_factory=MemoizationPolicySpec)`.
+In `basalt.core.dag.ast`, expose `MemoizationPolicySpec` and add a `memoization` field to `StepSpec`. The policy has `enabled: bool = False`, `key: str | None = None`, `ttl_seconds: float | None = None`, and `include_inputs: bool = True`; supplied TTL values must be positive.
 
-In `basalt.core.engine.hooks`: add `LifecycleEvent.STEP_CACHE_HIT = "step_cache_hit"`.
+Expose an asynchronous `ResultCache` from `basalt.core.engine.memoization`. It supports `get(key)`, `put(key, output, ttl_seconds=None)`, `invalidate(key)`, `clear()`, `keys()`, and `stats()`. Missing or expired values return `None`; invalidation reports whether an entry existed; clearing returns the removal count; and statistics contain integer `entries`, `hits`, and `misses`. Copy values at both storage boundaries so callers cannot mutate cached data.
 
-In `basalt.core.engine.memoization`, async `ResultCache`:
-- `get(key)`: returns deep copy on hit; on miss/expiry returns `None`, purges entry, increments misses.
-- `put(key, output, ttl_seconds=None)`: stores deep copy and optional expiry.
-- `invalidate(key) -> bool`: returns `True` if deleted else `False`.
-- `clear() -> int` (purges all) and `purge_expired() -> int` (purges expired): return count removed.
-- `keys() -> list[str]`: purges expired entries, returns active keys.
-- `stats()`: purges expired entries, returns `{"entries": int, "hits": int, "misses": int}`.
-
-In `basalt.core.engine.memoization_admin`:
-- `CacheSummary`: dataclass (`entries: int`, `hits: int`, `misses: int`, `hit_rate: float`, `keys: tuple[str, ...]`); `as_dict()` returns dict of fields.
-- `CacheAdministration(cache: ResultCache)` with async methods: `summary() -> CacheSummary` (keys as tuple; hit rate `hits/(hits+misses)` or `0.0`), `contains(key) -> bool` (returns True if active else False), `keys(prefix=None) -> list[str]` (sorted active keys, prefix-filtered if given), `evict_expired() -> int`, `invalidate_prefix(prefix) -> int`, and `invalidate_many(keys) -> int` (deduplicates keys; each returns count removed).
-
-In `WorkflowRunner`:
-- `__init__` accepts optional `result_cache` (on `self.result_cache`, defaults to `ResultCache()`).
-- Cache key: namespace (`policy.key` if set, else `f"{context.dag_id}:{step.id}"`), step definition (`step.model_dump(mode="json")` excluding `name`, `description`, `memoization`), upstream outputs (`{p: context.get_step_output(p) for p in sorted(step.depends_on)}`), and `context.inputs` (if `include_inputs`).
-- When `step.memoization.enabled`: on hit, skip execution/STEP_START, set `context.set_step_state(step.id, StepState.COMPLETED)` and `context.set_step_output(step.id, cached)`, trigger `STEP_CACHE_HIT` (`{"step_id": step.id, "cache_key": key, "output": cached}`) then `STEP_SUCCESS` (`{"step_id": step.id, "output": cached, "cached": True}`). On miss: execute; on success cache with TTL and trigger `STEP_SUCCESS` (`{"step_id": step.id, "output": output, "cached": False}`). Never cache failures.
+Let `WorkflowRunner` accept an optional `result_cache`, defaulting to a new cache. For memoization-enabled steps, reuse a successful result when the policy key and relevant workflow inputs match. Different explicit keys must not collide. Exclude inputs when `include_inputs` is false, honor TTL expiration, and never cache failed executions. A cache hit must produce the same completed step state and workflow output as normal execution, allowing one cache to be shared by multiple runners.
 
 IMPORTANT: Please work on this in a new branch from main and commit everything when you are done.

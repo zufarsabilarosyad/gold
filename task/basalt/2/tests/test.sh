@@ -50,7 +50,7 @@ PYTEST_ADDOPTS="-p no:cacheprovider -p pytest_asyncio.plugin --confcutdir=/app/t
   tests/test_context_evaluator.py tests/test_dag_sorter.py tests/test_executors.py \
   tests/test_resilience.py tests/test_state_machine.py
 PYTEST_ADDOPTS="-p no:cacheprovider -p pytest_asyncio.plugin --confcutdir=/app/tests -c /dev/null --rootdir=/app --asyncio-mode=auto --junitxml=/logs/verifier/new.xml" run_log python3 -P -c 'import sys, pytest, pytest_asyncio.plugin; sys.path.insert(0, "/app/src"); raise SystemExit(pytest.main())' -q \
-  tests/test_result_memoization.py tests/test_result_memoization_contract_notes.py
+  tests/test_result_memoization.py tests/test_result_cache.py
 set -e
 # >>> END RUN TESTS <<<
 

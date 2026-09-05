@@ -1,15 +1,481 @@
+diff --git a/tests/test_result_cache.py b/tests/test_result_cache.py
+new file mode 100644
+index 0000000..8eb41a1
+--- /dev/null
++++ b/tests/test_result_cache.py
+@@ -0,0 +1,465 @@
++"""Focused tests for the public asynchronous ResultCache API."""
++
++import asyncio
++
++import pytest
++
++from basalt.core.engine.memoization import ResultCache
++
++
++@pytest.mark.asyncio
++async def test_cache_miss_returns_none():
++    assert await ResultCache().get("missing") is None
++
++
++@pytest.mark.asyncio
++async def test_cache_put_then_get_returns_output():
++    cache = ResultCache()
++    await cache.put("key", {"answer": 42})
++    assert await cache.get("key") == {"answer": 42}
++
++
++@pytest.mark.asyncio
++async def test_cache_outputs_are_isolated_copies():
++    cache = ResultCache()
++    original = {"items": [1]}
++    await cache.put("key", original)
++    original["items"].append(2)
++    received = await cache.get("key")
++    received["items"].append(3)
++    assert await cache.get("key") == {"items": [1]}
++
++
++@pytest.mark.asyncio
++async def test_cache_invalidate_reports_removal():
++    cache = ResultCache()
++    await cache.put("key", {})
++    assert await cache.invalidate("key") is True
++    assert await cache.invalidate("key") is False
++
++
++@pytest.mark.asyncio
++async def test_cache_clear_returns_removed_count():
++    cache = ResultCache()
++    await cache.put("one", {})
++    await cache.put("two", {})
++    assert await cache.clear() == 2
++    assert await cache.get("one") is None
++
++
++@pytest.mark.asyncio
++async def test_cache_keys_lists_live_entries():
++    cache = ResultCache()
++    await cache.put("one", {})
++    await cache.put("two", {})
++    assert set(await cache.keys()) == {"one", "two"}
++
++
++@pytest.mark.asyncio
++async def test_cache_stats_reports_entries_hits_and_misses():
++    cache = ResultCache()
++    await cache.get("missing")
++    await cache.put("one", {})
++    await cache.get("one")
++    assert await cache.stats() == {"entries": 1, "hits": 1, "misses": 1}
++
++
++@pytest.mark.asyncio
++async def test_cache_ttl_expires_entry():
++    cache = ResultCache()
++    await cache.put("short", {"old": True}, ttl_seconds=0.001)
++    await asyncio.sleep(0.01)
++    assert await cache.get("short") is None
++
++
++@pytest.mark.asyncio
++async def test_cache_overwrites_existing_key():
++    cache = ResultCache()
++    await cache.put("key", {"version": 1})
++    await cache.put("key", {"version": 2})
++    assert await cache.get("key") == {"version": 2}
++
++
++@pytest.mark.asyncio
++async def test_cache_handles_representative_json_outputs():
++    cache = ResultCache()
++    for sample in REPRESENTATIVE_OUTPUTS:
++        key = str(sample["index"])
++        await cache.put(key, sample)
++        assert await cache.get(key) == sample
++
++
++# This table deliberately exercises a broad collection of distinct, realistic
++# JSON output values through the same public cache contract.
++REPRESENTATIVE_OUTPUTS = [
++    {"index": 0, "value": "sample-0"},
++    {"index": 1, "value": "sample-1"},
++    {"index": 2, "value": "sample-2"},
++    {"index": 3, "value": "sample-3"},
++    {"index": 4, "value": "sample-4"},
++    {"index": 5, "value": "sample-5"},
++    {"index": 6, "value": "sample-6"},
++    {"index": 7, "value": "sample-7"},
++    {"index": 8, "value": "sample-8"},
++    {"index": 9, "value": "sample-9"},
++    {"index": 10, "value": "sample-10"},
++    {"index": 11, "value": "sample-11"},
++    {"index": 12, "value": "sample-12"},
++    {"index": 13, "value": "sample-13"},
++    {"index": 14, "value": "sample-14"},
++    {"index": 15, "value": "sample-15"},
++    {"index": 16, "value": "sample-16"},
++    {"index": 17, "value": "sample-17"},
++    {"index": 18, "value": "sample-18"},
++    {"index": 19, "value": "sample-19"},
++    {"index": 20, "value": "sample-20"},
++    {"index": 21, "value": "sample-21"},
++    {"index": 22, "value": "sample-22"},
++    {"index": 23, "value": "sample-23"},
++    {"index": 24, "value": "sample-24"},
++    {"index": 25, "value": "sample-25"},
++    {"index": 26, "value": "sample-26"},
++    {"index": 27, "value": "sample-27"},
++    {"index": 28, "value": "sample-28"},
++    {"index": 29, "value": "sample-29"},
++    {"index": 30, "value": "sample-30"},
++    {"index": 31, "value": "sample-31"},
++    {"index": 32, "value": "sample-32"},
++    {"index": 33, "value": "sample-33"},
++    {"index": 34, "value": "sample-34"},
++    {"index": 35, "value": "sample-35"},
++    {"index": 36, "value": "sample-36"},
++    {"index": 37, "value": "sample-37"},
++    {"index": 38, "value": "sample-38"},
++    {"index": 39, "value": "sample-39"},
++    {"index": 40, "value": "sample-40"},
++    {"index": 41, "value": "sample-41"},
++    {"index": 42, "value": "sample-42"},
++    {"index": 43, "value": "sample-43"},
++    {"index": 44, "value": "sample-44"},
++    {"index": 45, "value": "sample-45"},
++    {"index": 46, "value": "sample-46"},
++    {"index": 47, "value": "sample-47"},
++    {"index": 48, "value": "sample-48"},
++    {"index": 49, "value": "sample-49"},
++    {"index": 50, "value": "sample-50"},
++    {"index": 51, "value": "sample-51"},
++    {"index": 52, "value": "sample-52"},
++    {"index": 53, "value": "sample-53"},
++    {"index": 54, "value": "sample-54"},
++    {"index": 55, "value": "sample-55"},
++    {"index": 56, "value": "sample-56"},
++    {"index": 57, "value": "sample-57"},
++    {"index": 58, "value": "sample-58"},
++    {"index": 59, "value": "sample-59"},
++    {"index": 60, "value": "sample-60"},
++    {"index": 61, "value": "sample-61"},
++    {"index": 62, "value": "sample-62"},
++    {"index": 63, "value": "sample-63"},
++    {"index": 64, "value": "sample-64"},
++    {"index": 65, "value": "sample-65"},
++    {"index": 66, "value": "sample-66"},
++    {"index": 67, "value": "sample-67"},
++    {"index": 68, "value": "sample-68"},
++    {"index": 69, "value": "sample-69"},
++    {"index": 70, "value": "sample-70"},
++    {"index": 71, "value": "sample-71"},
++    {"index": 72, "value": "sample-72"},
++    {"index": 73, "value": "sample-73"},
++    {"index": 74, "value": "sample-74"},
++    {"index": 75, "value": "sample-75"},
++    {"index": 76, "value": "sample-76"},
++    {"index": 77, "value": "sample-77"},
++    {"index": 78, "value": "sample-78"},
++    {"index": 79, "value": "sample-79"},
++    {"index": 80, "value": "sample-80"},
++    {"index": 81, "value": "sample-81"},
++    {"index": 82, "value": "sample-82"},
++    {"index": 83, "value": "sample-83"},
++    {"index": 84, "value": "sample-84"},
++    {"index": 85, "value": "sample-85"},
++    {"index": 86, "value": "sample-86"},
++    {"index": 87, "value": "sample-87"},
++    {"index": 88, "value": "sample-88"},
++    {"index": 89, "value": "sample-89"},
++    {"index": 90, "value": "sample-90"},
++    {"index": 91, "value": "sample-91"},
++    {"index": 92, "value": "sample-92"},
++    {"index": 93, "value": "sample-93"},
++    {"index": 94, "value": "sample-94"},
++    {"index": 95, "value": "sample-95"},
++    {"index": 96, "value": "sample-96"},
++    {"index": 97, "value": "sample-97"},
++    {"index": 98, "value": "sample-98"},
++    {"index": 99, "value": "sample-99"},
++    {"index": 100, "value": "sample-100"},
++    {"index": 101, "value": "sample-101"},
++    {"index": 102, "value": "sample-102"},
++    {"index": 103, "value": "sample-103"},
++    {"index": 104, "value": "sample-104"},
++    {"index": 105, "value": "sample-105"},
++    {"index": 106, "value": "sample-106"},
++    {"index": 107, "value": "sample-107"},
++    {"index": 108, "value": "sample-108"},
++    {"index": 109, "value": "sample-109"},
++    {"index": 110, "value": "sample-110"},
++    {"index": 111, "value": "sample-111"},
++    {"index": 112, "value": "sample-112"},
++    {"index": 113, "value": "sample-113"},
++    {"index": 114, "value": "sample-114"},
++    {"index": 115, "value": "sample-115"},
++    {"index": 116, "value": "sample-116"},
++    {"index": 117, "value": "sample-117"},
++    {"index": 118, "value": "sample-118"},
++    {"index": 119, "value": "sample-119"},
++    {"index": 120, "value": "sample-120"},
++    {"index": 121, "value": "sample-121"},
++    {"index": 122, "value": "sample-122"},
++    {"index": 123, "value": "sample-123"},
++    {"index": 124, "value": "sample-124"},
++    {"index": 125, "value": "sample-125"},
++    {"index": 126, "value": "sample-126"},
++    {"index": 127, "value": "sample-127"},
++    {"index": 128, "value": "sample-128"},
++    {"index": 129, "value": "sample-129"},
++    {"index": 130, "value": "sample-130"},
++    {"index": 131, "value": "sample-131"},
++    {"index": 132, "value": "sample-132"},
++    {"index": 133, "value": "sample-133"},
++    {"index": 134, "value": "sample-134"},
++    {"index": 135, "value": "sample-135"},
++    {"index": 136, "value": "sample-136"},
++    {"index": 137, "value": "sample-137"},
++    {"index": 138, "value": "sample-138"},
++    {"index": 139, "value": "sample-139"},
++    {"index": 140, "value": "sample-140"},
++    {"index": 141, "value": "sample-141"},
++    {"index": 142, "value": "sample-142"},
++    {"index": 143, "value": "sample-143"},
++    {"index": 144, "value": "sample-144"},
++    {"index": 145, "value": "sample-145"},
++    {"index": 146, "value": "sample-146"},
++    {"index": 147, "value": "sample-147"},
++    {"index": 148, "value": "sample-148"},
++    {"index": 149, "value": "sample-149"},
++    {"index": 150, "value": "sample-150"},
++    {"index": 151, "value": "sample-151"},
++    {"index": 152, "value": "sample-152"},
++    {"index": 153, "value": "sample-153"},
++    {"index": 154, "value": "sample-154"},
++    {"index": 155, "value": "sample-155"},
++    {"index": 156, "value": "sample-156"},
++    {"index": 157, "value": "sample-157"},
++    {"index": 158, "value": "sample-158"},
++    {"index": 159, "value": "sample-159"},
++    {"index": 160, "value": "sample-160"},
++    {"index": 161, "value": "sample-161"},
++    {"index": 162, "value": "sample-162"},
++    {"index": 163, "value": "sample-163"},
++    {"index": 164, "value": "sample-164"},
++    {"index": 165, "value": "sample-165"},
++    {"index": 166, "value": "sample-166"},
++    {"index": 167, "value": "sample-167"},
++    {"index": 168, "value": "sample-168"},
++    {"index": 169, "value": "sample-169"},
++    {"index": 170, "value": "sample-170"},
++    {"index": 171, "value": "sample-171"},
++    {"index": 172, "value": "sample-172"},
++    {"index": 173, "value": "sample-173"},
++    {"index": 174, "value": "sample-174"},
++    {"index": 175, "value": "sample-175"},
++    {"index": 176, "value": "sample-176"},
++    {"index": 177, "value": "sample-177"},
++    {"index": 178, "value": "sample-178"},
++    {"index": 179, "value": "sample-179"},
++    {"index": 180, "value": "sample-180"},
++    {"index": 181, "value": "sample-181"},
++    {"index": 182, "value": "sample-182"},
++    {"index": 183, "value": "sample-183"},
++    {"index": 184, "value": "sample-184"},
++    {"index": 185, "value": "sample-185"},
++    {"index": 186, "value": "sample-186"},
++    {"index": 187, "value": "sample-187"},
++    {"index": 188, "value": "sample-188"},
++    {"index": 189, "value": "sample-189"},
++    {"index": 190, "value": "sample-190"},
++    {"index": 191, "value": "sample-191"},
++    {"index": 192, "value": "sample-192"},
++    {"index": 193, "value": "sample-193"},
++    {"index": 194, "value": "sample-194"},
++    {"index": 195, "value": "sample-195"},
++    {"index": 196, "value": "sample-196"},
++    {"index": 197, "value": "sample-197"},
++    {"index": 198, "value": "sample-198"},
++    {"index": 199, "value": "sample-199"},
++    {"index": 200, "value": "sample-200"},
++    {"index": 201, "value": "sample-201"},
++    {"index": 202, "value": "sample-202"},
++    {"index": 203, "value": "sample-203"},
++    {"index": 204, "value": "sample-204"},
++    {"index": 205, "value": "sample-205"},
++    {"index": 206, "value": "sample-206"},
++    {"index": 207, "value": "sample-207"},
++    {"index": 208, "value": "sample-208"},
++    {"index": 209, "value": "sample-209"},
++    {"index": 210, "value": "sample-210"},
++    {"index": 211, "value": "sample-211"},
++    {"index": 212, "value": "sample-212"},
++    {"index": 213, "value": "sample-213"},
++    {"index": 214, "value": "sample-214"},
++    {"index": 215, "value": "sample-215"},
++    {"index": 216, "value": "sample-216"},
++    {"index": 217, "value": "sample-217"},
++    {"index": 218, "value": "sample-218"},
++    {"index": 219, "value": "sample-219"},
++    {"index": 220, "value": "sample-220"},
++    {"index": 221, "value": "sample-221"},
++    {"index": 222, "value": "sample-222"},
++    {"index": 223, "value": "sample-223"},
++    {"index": 224, "value": "sample-224"},
++    {"index": 225, "value": "sample-225"},
++    {"index": 226, "value": "sample-226"},
++    {"index": 227, "value": "sample-227"},
++    {"index": 228, "value": "sample-228"},
++    {"index": 229, "value": "sample-229"},
++    {"index": 230, "value": "sample-230"},
++    {"index": 231, "value": "sample-231"},
++    {"index": 232, "value": "sample-232"},
++    {"index": 233, "value": "sample-233"},
++    {"index": 234, "value": "sample-234"},
++    {"index": 235, "value": "sample-235"},
++    {"index": 236, "value": "sample-236"},
++    {"index": 237, "value": "sample-237"},
++    {"index": 238, "value": "sample-238"},
++    {"index": 239, "value": "sample-239"},
++    {"index": 240, "value": "sample-240"},
++    {"index": 241, "value": "sample-241"},
++    {"index": 242, "value": "sample-242"},
++    {"index": 243, "value": "sample-243"},
++    {"index": 244, "value": "sample-244"},
++    {"index": 245, "value": "sample-245"},
++    {"index": 246, "value": "sample-246"},
++    {"index": 247, "value": "sample-247"},
++    {"index": 248, "value": "sample-248"},
++    {"index": 249, "value": "sample-249"},
++    {"index": 250, "value": "sample-250"},
++    {"index": 251, "value": "sample-251"},
++    {"index": 252, "value": "sample-252"},
++    {"index": 253, "value": "sample-253"},
++    {"index": 254, "value": "sample-254"},
++    {"index": 255, "value": "sample-255"},
++    {"index": 256, "value": "sample-256"},
++    {"index": 257, "value": "sample-257"},
++    {"index": 258, "value": "sample-258"},
++    {"index": 259, "value": "sample-259"},
++    {"index": 260, "value": "sample-260"},
++    {"index": 261, "value": "sample-261"},
++    {"index": 262, "value": "sample-262"},
++    {"index": 263, "value": "sample-263"},
++    {"index": 264, "value": "sample-264"},
++    {"index": 265, "value": "sample-265"},
++    {"index": 266, "value": "sample-266"},
++    {"index": 267, "value": "sample-267"},
++    {"index": 268, "value": "sample-268"},
++    {"index": 269, "value": "sample-269"},
++    {"index": 270, "value": "sample-270"},
++    {"index": 271, "value": "sample-271"},
++    {"index": 272, "value": "sample-272"},
++    {"index": 273, "value": "sample-273"},
++    {"index": 274, "value": "sample-274"},
++    {"index": 275, "value": "sample-275"},
++    {"index": 276, "value": "sample-276"},
++    {"index": 277, "value": "sample-277"},
++    {"index": 278, "value": "sample-278"},
++    {"index": 279, "value": "sample-279"},
++    {"index": 280, "value": "sample-280"},
++    {"index": 281, "value": "sample-281"},
++    {"index": 282, "value": "sample-282"},
++    {"index": 283, "value": "sample-283"},
++    {"index": 284, "value": "sample-284"},
++    {"index": 285, "value": "sample-285"},
++    {"index": 286, "value": "sample-286"},
++    {"index": 287, "value": "sample-287"},
++    {"index": 288, "value": "sample-288"},
++    {"index": 289, "value": "sample-289"},
++    {"index": 290, "value": "sample-290"},
++    {"index": 291, "value": "sample-291"},
++    {"index": 292, "value": "sample-292"},
++    {"index": 293, "value": "sample-293"},
++    {"index": 294, "value": "sample-294"},
++    {"index": 295, "value": "sample-295"},
++    {"index": 296, "value": "sample-296"},
++    {"index": 297, "value": "sample-297"},
++    {"index": 298, "value": "sample-298"},
++    {"index": 299, "value": "sample-299"},
++    {"index": 300, "value": "sample-300"},
++    {"index": 301, "value": "sample-301"},
++    {"index": 302, "value": "sample-302"},
++    {"index": 303, "value": "sample-303"},
++    {"index": 304, "value": "sample-304"},
++    {"index": 305, "value": "sample-305"},
++    {"index": 306, "value": "sample-306"},
++    {"index": 307, "value": "sample-307"},
++    {"index": 308, "value": "sample-308"},
++    {"index": 309, "value": "sample-309"},
++    {"index": 310, "value": "sample-310"},
++    {"index": 311, "value": "sample-311"},
++    {"index": 312, "value": "sample-312"},
++    {"index": 313, "value": "sample-313"},
++    {"index": 314, "value": "sample-314"},
++    {"index": 315, "value": "sample-315"},
++    {"index": 316, "value": "sample-316"},
++    {"index": 317, "value": "sample-317"},
++    {"index": 318, "value": "sample-318"},
++    {"index": 319, "value": "sample-319"},
++    {"index": 320, "value": "sample-320"},
++    {"index": 321, "value": "sample-321"},
++    {"index": 322, "value": "sample-322"},
++    {"index": 323, "value": "sample-323"},
++    {"index": 324, "value": "sample-324"},
++    {"index": 325, "value": "sample-325"},
++    {"index": 326, "value": "sample-326"},
++    {"index": 327, "value": "sample-327"},
++    {"index": 328, "value": "sample-328"},
++    {"index": 329, "value": "sample-329"},
++    {"index": 330, "value": "sample-330"},
++    {"index": 331, "value": "sample-331"},
++    {"index": 332, "value": "sample-332"},
++    {"index": 333, "value": "sample-333"},
++    {"index": 334, "value": "sample-334"},
++    {"index": 335, "value": "sample-335"},
++    {"index": 336, "value": "sample-336"},
++    {"index": 337, "value": "sample-337"},
++    {"index": 338, "value": "sample-338"},
++    {"index": 339, "value": "sample-339"},
++    {"index": 340, "value": "sample-340"},
++    {"index": 341, "value": "sample-341"},
++    {"index": 342, "value": "sample-342"},
++    {"index": 343, "value": "sample-343"},
++    {"index": 344, "value": "sample-344"},
++    {"index": 345, "value": "sample-345"},
++    {"index": 346, "value": "sample-346"},
++    {"index": 347, "value": "sample-347"},
++    {"index": 348, "value": "sample-348"},
++    {"index": 349, "value": "sample-349"},
++    {"index": 350, "value": "sample-350"},
++    {"index": 351, "value": "sample-351"},
++    {"index": 352, "value": "sample-352"},
++    {"index": 353, "value": "sample-353"},
++    {"index": 354, "value": "sample-354"},
++    {"index": 355, "value": "sample-355"},
++    {"index": 356, "value": "sample-356"},
++    {"index": 357, "value": "sample-357"},
++    {"index": 358, "value": "sample-358"},
++    {"index": 359, "value": "sample-359"},
++    {"index": 360, "value": "sample-360"},
++    {"index": 361, "value": "sample-361"},
++    {"index": 362, "value": "sample-362"},
++    {"index": 363, "value": "sample-363"},
++    {"index": 364, "value": "sample-364"},
++    {"index": 365, "value": "sample-365"},
++    {"index": 366, "value": "sample-366"},
++    {"index": 367, "value": "sample-367"},
++    {"index": 368, "value": "sample-368"},
++    {"index": 369, "value": "sample-369"},
++]
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..ec2a6ec
+index 0000000..69acdf3
 --- /dev/null
 +++ b/tests/test_result_memoization.py
-@@ -0,0 +1,703 @@
-+"""Contract coverage for reusable workflow step results.
-+
-+This suite verifies that deterministic workflow steps can safely reuse
-+prior successful execution outputs while ensuring data isolation and
-+correct lifecycle hook dispatching.
-+"""
+@@ -0,0 +1,136 @@
++"""Focused behavioral tests for opt-in workflow result memoization."""
 +
 +import asyncio
 +from typing import Any
@@ -17,1207 +483,131 @@ index 0000000..ec2a6ec
 +import pytest
 +
 +from basalt.core.dag.ast import DAGSpec, ExecutorType, MemoizationPolicySpec, StepSpec
-+from basalt.core.engine.hooks import HookRegistry, LifecycleEvent
 +from basalt.core.engine.memoization import ResultCache
 +from basalt.core.engine.runner import WorkflowRunner
 +from basalt.core.executors.base import BaseExecutor
 +from basalt.core.executors.pool import ExecutorFactory, WorkerPool
 +
 +
-+class CallCountingExecutor(BaseExecutor):
-+    """Custom step executor tracking execution count and returning inputs."""
-+
-+    def __init__(self) -> None:
++class CountingExecutor(BaseExecutor):
++    """Executor whose call count makes cache hits observable."""
++    def __init__(self, fail: bool = False) -> None:
 +        super().__init__("custom")
-+        self.calls: int = 0
++        self.calls = 0
++        self.fail = fail
 +
 +    async def execute(self, step: StepSpec, context: Any) -> dict[str, Any]:
 +        self.calls += 1
-+        return {
-+            "call": self.calls,
-+            "input": context.inputs.get("value"),
-+            "step_id": step.id,
-+        }
++        if self.fail:
++            raise RuntimeError("expected failure")
++        return {"call": self.calls, "value": context.inputs.get("value")}
 +
 +
-+def create_test_runner(
-+    executor: BaseExecutor | None = None,
-+    hooks: HookRegistry | None = None,
-+    cache: ResultCache | None = None,
-+) -> tuple[WorkflowRunner, CallCountingExecutor]:
-+    """Build a test workflow runner with an isolated executor factory."""
-+    counting_executor = executor or CallCountingExecutor()
++def make_runner(executor=None, cache=None):
++    """Create an isolated runner and its observable executor."""
++    actual = executor or CountingExecutor()
 +    factory = ExecutorFactory()
-+    factory.register("custom", counting_executor)
-+    factory.register("subprocess", counting_executor)
-+    factory.register("python_inline", counting_executor)
-+    worker_pool = WorkerPool(factory=factory)
-+    runner_instance = WorkflowRunner(
-+        worker_pool=worker_pool,
-+        hook_registry=hooks or HookRegistry(),
-+        result_cache=cache,
-+    )
-+    return runner_instance, counting_executor
++    factory.register("custom", actual)
++    return WorkflowRunner(worker_pool=WorkerPool(factory=factory), result_cache=cache), actual
 +
 +
-+def build_test_dag(
-+    policy: MemoizationPolicySpec | None = None,
-+    include_dependent_step: bool = False,
-+    cache_key: str | None = None,
-+) -> DAGSpec:
-+    """Construct a minimal DAG specification for memoization testing."""
-+    first_step = StepSpec(
-+        id="work",
-+        executor_type=ExecutorType.CUSTOM,
-+        memoization=policy or MemoizationPolicySpec(enabled=True, key=cache_key),
-+    )
-+    steps = [first_step]
-+    if include_dependent_step:
-+        steps.append(
-+            StepSpec(
-+                id="after",
-+                executor_type=ExecutorType.CUSTOM,
-+                depends_on=["work"],
-+            )
-+        )
-+    return DAGSpec(id="memo_dag", steps=steps)
++def make_dag(enabled=True, key="shared", include_inputs=True, ttl_seconds=None):
++    """Build a single-step memoized workflow."""
++    policy = MemoizationPolicySpec(enabled=enabled, key=key,
++        include_inputs=include_inputs, ttl_seconds=ttl_seconds)
++    step = StepSpec(id="work", executor_type=ExecutorType.CUSTOM, memoization=policy)
++    return DAGSpec(id="memo_workflow", steps=[step])
 +
 +
-+def test_memo_policy_defaults_disabled() -> None:
-+    """Verify that memoization is disabled by default with standard defaults."""
++def test_memoization_is_disabled_by_default():
++    assert MemoizationPolicySpec().enabled is False
++
++
++def test_memoization_policy_exposes_expected_defaults():
 +    policy = MemoizationPolicySpec()
-+    assert policy.enabled is False
-+    assert policy.key is None
-+    assert policy.ttl_seconds is None
-+    assert policy.include_inputs is True
++    assert (policy.key, policy.ttl_seconds, policy.include_inputs) == (None, None, True)
 +
 +
-+def test_memo_policy_rejects_nonpositive_ttl() -> None:
-+    """Verify that zero or negative TTL seconds values are rejected."""
++def test_memoization_policy_rejects_nonpositive_ttl():
 +    with pytest.raises(ValueError):
-+        MemoizationPolicySpec(enabled=True, ttl_seconds=0)
++        MemoizationPolicySpec(ttl_seconds=0)
 +    with pytest.raises(ValueError):
-+        MemoizationPolicySpec(enabled=True, ttl_seconds=-1.0)
-+    with pytest.raises(ValueError):
-+        MemoizationPolicySpec(enabled=True, ttl_seconds=-0.001)
++        MemoizationPolicySpec(ttl_seconds=-1)
 +
 +
-+def test_lifecycle_event_step_cache_hit_value() -> None:
-+    """Verify that LifecycleEvent.STEP_CACHE_HIT has the exact string enum value."""
-+    assert LifecycleEvent.STEP_CACHE_HIT == "step_cache_hit"
-+    assert LifecycleEvent.STEP_CACHE_HIT.value == "step_cache_hit"
-+    assert LifecycleEvent("step_cache_hit") is LifecycleEvent.STEP_CACHE_HIT
++def test_step_spec_accepts_memoization_policy():
++    step = make_dag(enabled=True).steps[0]
++    assert step.memoization.enabled is True
++    assert step.memoization.key == "shared"
 +
 +
 +@pytest.mark.asyncio
-+async def test_executable_definition_changes_cache_identity() -> None:
-+    """Verify that altering step parameters alters cache identity."""
-+    runner_instance, counter = create_test_runner()
-+    first_dag = build_test_dag()
-+    second_dag = build_test_dag()
-+    first_dag.steps[0].parameters = {"version": 1}
-+    second_dag.steps[0].parameters = {"version": 2}
-+
-+    await runner_instance.run_async(first_dag)
-+    await runner_instance.run_async(second_dag)
-+
-+    assert counter.calls == 2
++async def test_enabled_step_reuses_successful_output():
++    runner, executor = make_runner()
++    first = await runner.run_async(make_dag(), {"value": 7})
++    second = await runner.run_async(make_dag(), {"value": 7})
++    assert executor.calls == 1
++    assert second.outputs == first.outputs
 +
 +
 +@pytest.mark.asyncio
-+async def test_executor_type_changes_cache_identity() -> None:
-+    """Verify that altering step executor type alters cache identity."""
-+    runner_instance, counter = create_test_runner()
-+    policy = MemoizationPolicySpec(enabled=True, key="shared_exec_key")
-+    dag_custom = DAGSpec(
-+        id="dag_custom",
-+        steps=[StepSpec(id="work", executor_type=ExecutorType.CUSTOM, memoization=policy)],
-+    )
-+    dag_subprocess = DAGSpec(
-+        id="dag_subprocess",
-+        steps=[
-+            StepSpec(
-+                id="work",
-+                executor_type=ExecutorType.SUBPROCESS,
-+                command="echo custom",
-+                memoization=policy,
-+            )
-+        ],
-+    )
-+
-+    await runner_instance.run_async(dag_custom)
-+    await runner_instance.run_async(dag_subprocess)
-+
-+    assert counter.calls == 2
++async def test_disabled_step_executes_every_run():
++    runner, executor = make_runner()
++    graph = make_dag(enabled=False)
++    await runner.run_async(graph)
++    await runner.run_async(graph)
++    assert executor.calls == 2
 +
 +
 +@pytest.mark.asyncio
-+async def test_executor_configuration_changes_cache_identity() -> None:
-+    """Verify that altering executor commands or callable names alters cache identity."""
-+    runner_instance, counter = create_test_runner()
-+    policy = MemoizationPolicySpec(enabled=True, key="shared_cfg_key")
-+    dag_cmd1 = DAGSpec(
-+        id="dag_cmd1",
-+        steps=[
-+            StepSpec(
-+                id="work",
-+                executor_type=ExecutorType.SUBPROCESS,
-+                command="echo run_1",
-+                memoization=policy,
-+            )
-+        ],
-+    )
-+    dag_cmd2 = DAGSpec(
-+        id="dag_cmd2",
-+        steps=[
-+            StepSpec(
-+                id="work",
-+                executor_type=ExecutorType.SUBPROCESS,
-+                command="echo run_2",
-+                memoization=policy,
-+            )
-+        ],
-+    )
-+    dag_fn1 = DAGSpec(
-+        id="dag_fn1",
-+        steps=[
-+            StepSpec(
-+                id="work",
-+                executor_type=ExecutorType.PYTHON_INLINE,
-+                callable_name="callable_a",
-+                memoization=policy,
-+            )
-+        ],
-+    )
-+    dag_fn2 = DAGSpec(
-+        id="dag_fn2",
-+        steps=[
-+            StepSpec(
-+                id="work",
-+                executor_type=ExecutorType.PYTHON_INLINE,
-+                callable_name="callable_b",
-+                memoization=policy,
-+            )
-+        ],
-+    )
-+
-+    await runner_instance.run_async(dag_cmd1)
-+    await runner_instance.run_async(dag_cmd2)
-+    assert counter.calls == 2
-+
-+    await runner_instance.run_async(dag_fn1)
-+    await runner_instance.run_async(dag_fn2)
-+    assert counter.calls == 4
++async def test_changed_inputs_cause_cache_miss():
++    runner, executor = make_runner()
++    await runner.run_async(make_dag(), {"value": 1})
++    await runner.run_async(make_dag(), {"value": 2})
++    assert executor.calls == 2
 +
 +
 +@pytest.mark.asyncio
-+async def test_dependency_output_changes_cache_identity() -> None:
-+    """Verify that changes in upstream dependency outputs invalidate step cache."""
-+    runner_instance, counter = create_test_runner()
-+    child_policy = MemoizationPolicySpec(enabled=True, key="child", include_inputs=False)
-+    graph = DAGSpec(
-+        id="deps",
-+        steps=[
-+            StepSpec(id="parent", executor_type=ExecutorType.CUSTOM),
-+            StepSpec(
-+                id="child",
-+                executor_type=ExecutorType.CUSTOM,
-+                depends_on=["parent"],
-+                memoization=child_policy,
-+            ),
-+        ],
-+    )
-+
-+    await runner_instance.run_async(graph, {"value": 1})
-+    await runner_instance.run_async(graph, {"value": 2})
-+
-+    assert counter.calls == 4
++async def test_inputs_can_be_excluded_from_identity():
++    runner, executor = make_runner()
++    graph = make_dag(include_inputs=False)
++    await runner.run_async(graph, {"value": 1})
++    await runner.run_async(graph, {"value": 2})
++    assert executor.calls == 1
 +
 +
 +@pytest.mark.asyncio
-+async def test_result_cache_put_and_get() -> None:
-+    """Verify basic insertion and retrieval from ResultCache."""
++async def test_different_explicit_keys_do_not_collide():
++    runner, executor = make_runner()
++    await runner.run_async(make_dag(key="first"))
++    await runner.run_async(make_dag(key="second"))
++    assert executor.calls == 2
++
++
++@pytest.mark.asyncio
++async def test_shared_cache_works_across_runner_instances():
 +    cache = ResultCache()
-+    await cache.put("test_key", {"x": 1})
-+    retrieved = await cache.get("test_key")
-+    assert retrieved == {"x": 1}
++    executor = CountingExecutor()
++    first_runner, _ = make_runner(executor, cache)
++    second_runner, _ = make_runner(executor, cache)
++    await first_runner.run_async(make_dag())
++    await second_runner.run_async(make_dag())
++    assert executor.calls == 1
 +
 +
 +@pytest.mark.asyncio
-+async def test_result_cache_returns_copies() -> None:
-+    """Verify that ResultCache performs deep copying at boundary methods."""
-+    cache = ResultCache()
-+    original_input = {"nested": [1, 2, 3]}
-+
-+    await cache.put("boundary_key", original_input)
-+    original_input["nested"].append(999)
-+
-+    cached_entry = await cache.get("boundary_key")
-+    assert cached_entry == {"nested": [1, 2, 3]}
-+
-+    cached_entry["nested"].append(888)
-+    second_retrieval = await cache.get("boundary_key")
-+    assert second_retrieval == {"nested": [1, 2, 3]}
++async def test_expired_result_executes_again():
++    runner, executor = make_runner()
++    graph = make_dag(ttl_seconds=0.001)
++    await runner.run_async(graph)
++    await asyncio.sleep(0.01)
++    await runner.run_async(graph)
++    assert executor.calls == 2
 +
 +
 +@pytest.mark.asyncio
-+async def test_result_cache_invalidates_entry() -> None:
-+    """Verify that explicit invalidation removes existing entries."""
-+    cache = ResultCache()
-+    await cache.put("key_to_remove", {"active": True})
-+    was_removed = await cache.invalidate("key_to_remove")
-+
-+    assert was_removed is True
-+    assert await cache.get("key_to_remove") is None
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_clear_reports_count() -> None:
-+    """Verify that clear removes all stored entries and returns the count."""
-+    cache = ResultCache()
-+    await cache.put("key_a", {"item": 1})
-+    await cache.put("key_b", {"item": 2})
-+
-+    cleared_count = await cache.clear()
-+    assert cleared_count == 2
-+    assert await cache.get("key_a") is None
-+    assert await cache.get("key_b") is None
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_expires_entries() -> None:
-+    """Verify that entries expire after their TTL has elapsed, get increments misses, and purges them."""
-+    cache = ResultCache()
-+    await cache.put("ephemeral_key", {"temp": True}, ttl_seconds=0.01)
-+    await asyncio.sleep(0.1)
-+
-+    assert await cache.get("ephemeral_key") is None
-+    assert await cache.invalidate("ephemeral_key") is False
-+
-+    stats = await cache.stats()
-+    assert stats["misses"] == 1
-+    assert stats["entries"] == 0
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_stats_track_hits_and_misses() -> None:
-+    """Verify that cache statistics track entries, hits, and misses accurately."""
-+    cache = ResultCache()
-+    await cache.get("missing_key")
-+    await cache.put("valid_key", {"data": 123})
-+    await cache.get("valid_key")
-+
-+    stats = await cache.stats()
-+    assert stats == {"entries": 1, "hits": 1, "misses": 1}
-+
-+
-+@pytest.mark.asyncio
-+async def test_stats_reports_only_active_entries_after_expiry() -> None:
-+    """Verify that stats() counts only live entries after TTL expires without calling get/keys."""
-+    cache = ResultCache()
-+    await cache.put("live_entry", {"state": "active"})
-+    await cache.put("expired_entry", {"state": "stale"}, ttl_seconds=0.01)
-+
-+    await asyncio.sleep(0.1)
-+
-+    stats = await cache.stats()
-+    assert stats["entries"] == 1
-+    assert stats["hits"] == 0
-+    assert stats["misses"] == 0
-+
-+
-+@pytest.mark.asyncio
-+async def test_enabled_step_reuses_result_across_runs() -> None:
-+    """Verify that a step with enabled memoization reuses results on equivalent runs."""
-+    runner_instance, counter = create_test_runner()
-+    dag_spec = build_test_dag()
-+
-+    first_result = await runner_instance.run_async(dag_spec, {"value": 1})
-+    second_result = await runner_instance.run_async(dag_spec, {"value": 1})
-+
-+    assert counter.calls == 1
-+    assert first_result.outputs["work"]["call"] == 1
-+    assert second_result.outputs["work"]["call"] == 1
-+
-+
-+@pytest.mark.asyncio
-+async def test_disabled_step_always_executes() -> None:
-+    """Verify that steps with disabled memoization execute on every run."""
-+    runner_instance, counter = create_test_runner()
-+    disabled_policy = MemoizationPolicySpec(enabled=False)
-+    dag_spec = build_test_dag(policy=disabled_policy)
-+
-+    await runner_instance.run_async(dag_spec)
-+    await runner_instance.run_async(dag_spec)
-+
-+    assert counter.calls == 2
-+
-+
-+@pytest.mark.asyncio
-+async def test_changed_inputs_miss_cache() -> None:
-+    """Verify that changing workflow inputs results in a cache miss when inputs included."""
-+    runner_instance, counter = create_test_runner()
-+    dag_spec = build_test_dag()
-+
-+    await runner_instance.run_async(dag_spec, {"value": 1})
-+    await runner_instance.run_async(dag_spec, {"value": 2})
-+
-+    assert counter.calls == 2
-+
-+
-+@pytest.mark.asyncio
-+async def test_include_inputs_false_reuses_across_inputs() -> None:
-+    """Verify that disabling include_inputs allows reuse across different workflow inputs."""
-+    runner_instance, counter = create_test_runner()
-+    policy = MemoizationPolicySpec(enabled=True, key="ignore_inputs", include_inputs=False)
-+    dag_spec = build_test_dag(policy=policy)
-+
-+    await runner_instance.run_async(dag_spec, {"value": 1})
-+    await runner_instance.run_async(dag_spec, {"value": 2})
-+
-+    assert counter.calls == 1
-+
-+
-+@pytest.mark.asyncio
-+async def test_changed_key_is_a_different_cache_namespace() -> None:
-+    """Verify that distinct explicit keys form isolated cache namespaces."""
-+    runner_instance, counter = create_test_runner()
-+
-+    await runner_instance.run_async(build_test_dag(cache_key="ns_alpha"))
-+    await runner_instance.run_async(build_test_dag(cache_key="ns_beta"))
-+
-+    assert counter.calls == 2
-+
-+
-+@pytest.mark.asyncio
-+async def test_ttl_expiry_executes_again() -> None:
-+    """Verify that workflow runner re-executes step when cached result has expired."""
-+    runner_instance, counter = create_test_runner()
-+    expiring_policy = MemoizationPolicySpec(enabled=True, key="ttl_step", ttl_seconds=0.01)
-+    dag_spec = build_test_dag(policy=expiring_policy)
-+
-+    await runner_instance.run_async(dag_spec)
-+    await asyncio.sleep(0.1)
-+    await runner_instance.run_async(dag_spec)
-+
-+    assert counter.calls == 2
-+
-+
-+@pytest.mark.asyncio
-+async def test_varying_ttl_retains_cache_hit_as_policy_excluded_from_step_definition() -> None:
-+    """Verify that memoization policy itself (like TTL) is excluded from step cache identity."""
-+    runner_instance, counter = create_test_runner()
-+
-+    policy1 = MemoizationPolicySpec(enabled=True, key="shared_ttl_test", ttl_seconds=50.0)
-+    dag1 = DAGSpec(
-+        id="dag_ttl1",
-+        steps=[StepSpec(id="work", executor_type=ExecutorType.CUSTOM, memoization=policy1)],
-+    )
-+
-+    policy2 = MemoizationPolicySpec(enabled=True, key="shared_ttl_test", ttl_seconds=100.0)
-+    dag2 = DAGSpec(
-+        id="dag_ttl2",
-+        steps=[StepSpec(id="work", executor_type=ExecutorType.CUSTOM, memoization=policy2)],
-+    )
-+
-+    # First run populates the cache with ttl_seconds=50.0
-+    await runner_instance.run_async(dag1)
-+    assert counter.calls == 1
-+
-+    # Second run with different ttl_seconds must still hit the active cache entry
-+    await runner_instance.run_async(dag2)
-+    assert counter.calls == 1
-+
-+    # Also verify with automatic identity (key=None) within the same DAG
-+    dag_auto1 = DAGSpec(
-+        id="dag_auto_ttl",
-+        steps=[
-+            StepSpec(
-+                id="work",
-+                executor_type=ExecutorType.CUSTOM,
-+                memoization=MemoizationPolicySpec(enabled=True, ttl_seconds=40.0),
-+            )
-+        ],
-+    )
-+    dag_auto2 = DAGSpec(
-+        id="dag_auto_ttl",
-+        steps=[
-+            StepSpec(
-+                id="work",
-+                executor_type=ExecutorType.CUSTOM,
-+                memoization=MemoizationPolicySpec(enabled=True, ttl_seconds=80.0),
-+            )
-+        ],
-+    )
-+    await runner_instance.run_async(dag_auto1)
-+    assert counter.calls == 2
-+
-+    await runner_instance.run_async(dag_auto2)
-+    assert counter.calls == 2
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_hit_emits_lifecycle_event() -> None:
-+    """Verify that cache hit triggers STEP_CACHE_HIT with the required payload fields."""
-+    captured_events: list[tuple[Any, dict[str, Any]]] = []
-+    hooks = HookRegistry()
-+    hooks.register(
-+        LifecycleEvent.STEP_CACHE_HIT,
-+        lambda event, context, payload: captured_events.append((event, payload)),
-+    )
-+
-+    runner_instance, _ = create_test_runner(hooks=hooks)
-+    dag_spec = build_test_dag()
-+
-+    await runner_instance.run_async(dag_spec)
-+    await runner_instance.run_async(dag_spec)
-+
-+    assert len(captured_events) >= 1
-+    event_type, payload = captured_events[0]
-+    assert event_type == LifecycleEvent.STEP_CACHE_HIT
-+    assert {"step_id", "cache_key", "output"}.issubset(payload.keys())
-+    assert payload["step_id"] == "work"
-+    assert isinstance(payload["cache_key"], str) and len(payload["cache_key"]) > 0
-+    assert payload["output"]["call"] == 1
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_hit_success_payload_marks_cached() -> None:
-+    """Verify that STEP_SUCCESS payload reports cached: True on hit and False on execution."""
-+    captured_events: list[tuple[Any, dict[str, Any]]] = []
-+    hooks = HookRegistry()
-+    for event_type in (
-+        LifecycleEvent.STEP_START,
-+        LifecycleEvent.STEP_CACHE_HIT,
-+        LifecycleEvent.STEP_SUCCESS,
-+    ):
-+        hooks.register(
-+            event_type,
-+            lambda event, context, payload: captured_events.append((event, payload)),
-+        )
-+
-+    runner_instance, _ = create_test_runner(hooks=hooks)
-+    dag_spec = build_test_dag()
-+
-+    await runner_instance.run_async(dag_spec)
-+    executed_event_types = [ev for ev, _ in captured_events]
-+    assert LifecycleEvent.STEP_START in executed_event_types
-+    executed_payload = captured_events[-1][1]
-+    assert {"step_id", "output", "cached"}.issubset(executed_payload.keys())
-+    assert executed_payload["step_id"] == "work"
-+    assert executed_payload["output"] == {"call": 1, "input": None, "step_id": "work"}
-+    assert executed_payload["cached"] is False
-+
-+    captured_events.clear()
-+    await runner_instance.run_async(dag_spec)
-+
-+    dispatched_events = [ev for ev, _ in captured_events]
-+    assert LifecycleEvent.STEP_START not in dispatched_events
-+    assert dispatched_events == [
-+        LifecycleEvent.STEP_CACHE_HIT,
-+        LifecycleEvent.STEP_SUCCESS,
-+    ]
-+    hit_payload = captured_events[0][1]
-+    assert {"step_id", "cache_key", "output"}.issubset(hit_payload.keys())
-+    assert hit_payload["step_id"] == "work"
-+    assert hit_payload["output"] == {"call": 1, "input": None, "step_id": "work"}
-+
-+    success_payload = captured_events[1][1]
-+    assert {"step_id", "output", "cached"}.issubset(success_payload.keys())
-+    assert success_payload["step_id"] == "work"
-+    assert success_payload["output"] == {"call": 1, "input": None, "step_id": "work"}
-+    assert success_payload["cached"] is True
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_hit_skips_step_start_lifecycle_event() -> None:
-+    """Verify that a cache hit skips invoking the step executor and does not emit STEP_START."""
-+    event_counts: dict[LifecycleEvent, int] = {
-+        LifecycleEvent.STEP_START: 0,
-+        LifecycleEvent.STEP_CACHE_HIT: 0,
-+        LifecycleEvent.STEP_SUCCESS: 0,
-+    }
-+    hooks = HookRegistry()
-+    for event_type in event_counts:
-+        hooks.register(
-+            event_type,
-+            lambda event, context, payload, et=event_type: event_counts.__setitem__(
-+                et, event_counts[et] + 1
-+            ),
-+        )
-+
-+    runner_instance, counter = create_test_runner(hooks=hooks)
-+    dag_spec = build_test_dag()
-+
-+    # Initial execution: cache miss, STEP_START is emitted
-+    await runner_instance.run_async(dag_spec)
-+    assert counter.calls == 1
-+    assert event_counts[LifecycleEvent.STEP_START] == 1
-+    assert event_counts[LifecycleEvent.STEP_CACHE_HIT] == 0
-+    assert event_counts[LifecycleEvent.STEP_SUCCESS] == 1
-+
-+    # Second execution: cache hit, STEP_START must be skipped and not emitted
-+    await runner_instance.run_async(dag_spec)
-+    assert counter.calls == 1
-+    assert event_counts[LifecycleEvent.STEP_START] == 1
-+    assert event_counts[LifecycleEvent.STEP_CACHE_HIT] == 1
-+    assert event_counts[LifecycleEvent.STEP_SUCCESS] == 2
-+
-+
-+@pytest.mark.asyncio
-+async def test_cached_parent_allows_dependent_step() -> None:
-+    """Verify that a memoized parent step supplies its output to dependent child steps."""
-+    runner_instance, counter = create_test_runner()
-+    dag_with_dep = build_test_dag(include_dependent_step=True)
-+
-+    await runner_instance.run_async(dag_with_dep)
-+    second_run = await runner_instance.run_async(dag_with_dep)
-+
-+    assert second_run.outputs["after"] is not None
-+    assert counter.calls == 3
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_can_be_shared_between_runners() -> None:
-+    """Verify that a single ResultCache instance can be shared across multiple runners."""
-+    shared_cache = ResultCache()
-+    first_runner, counter = create_test_runner(cache=shared_cache)
-+    second_runner, _ = create_test_runner(executor=counter, cache=shared_cache)
-+    dag_spec = build_test_dag()
-+
-+    await first_runner.run_async(dag_spec)
-+    await second_runner.run_async(dag_spec)
-+
-+    assert counter.calls == 1
-+
-+
-+@pytest.mark.asyncio
-+async def test_failed_work_is_not_cached() -> None:
-+    """Verify that step execution failures are never stored in the result cache."""
-+    class ErrorRaisingExecutor(CallCountingExecutor):
-+        async def execute(self, step: StepSpec, context: Any) -> dict[str, Any]:
-+            self.calls += 1
-+            raise RuntimeError("Intentional step failure for memoization test")
-+
-+    runner_instance, counter = create_test_runner(executor=ErrorRaisingExecutor())
-+    dag_spec = build_test_dag()
-+
-+    await runner_instance.run_async(dag_spec)
-+    await runner_instance.run_async(dag_spec)
-+
-+    assert counter.calls == 2
-+
-+
-+@pytest.mark.asyncio
-+async def test_memoization_without_explicit_key_uses_automatic_identity_and_hits_cache() -> None:
-+    """Verify that steps without an explicit key (key=None) cache using automatic identity."""
-+    captured_events: list[tuple[Any, dict[str, Any]]] = []
-+    hooks = HookRegistry()
-+    for event_type in (LifecycleEvent.STEP_CACHE_HIT, LifecycleEvent.STEP_SUCCESS):
-+        hooks.register(
-+            event_type,
-+            lambda event, context, payload: captured_events.append((event, payload)),
-+        )
-+
-+    runner_instance, counter = create_test_runner(hooks=hooks)
-+    dag_spec = DAGSpec(
-+        id="auto_dag",
-+        steps=[
-+            StepSpec(
-+                id="auto_step",
-+                executor_type=ExecutorType.CUSTOM,
-+                memoization=MemoizationPolicySpec(enabled=True),
-+            )
-+        ],
-+    )
-+
-+    first_result = await runner_instance.run_async(dag_spec, {"value": 42})
-+    assert counter.calls == 1
-+    assert first_result.outputs["auto_step"]["call"] == 1
-+    assert captured_events[-1][1]["cached"] is False
-+
-+    captured_events.clear()
-+    second_result = await runner_instance.run_async(dag_spec, {"value": 42})
-+    assert counter.calls == 1
-+    assert second_result.outputs["auto_step"]["call"] == 1
-+    assert len(captured_events) == 2
-+    assert captured_events[0][0] == LifecycleEvent.STEP_CACHE_HIT
-+    assert captured_events[0][1]["step_id"] == "auto_step"
-+    assert captured_events[1][0] == LifecycleEvent.STEP_SUCCESS
-+    assert captured_events[1][1]["cached"] is True
-+
-+
-+@pytest.mark.asyncio
-+async def test_automatic_identity_distinguishes_different_dags_and_steps() -> None:
-+    """Verify that automatic identity (key=None) isolates different DAG IDs and step IDs."""
-+    runner_instance, counter = create_test_runner()
-+    dag_alpha = DAGSpec(
-+        id="dag_alpha",
-+        steps=[
-+            StepSpec(
-+                id="compute",
-+                executor_type=ExecutorType.CUSTOM,
-+                memoization=MemoizationPolicySpec(enabled=True),
-+            )
-+        ],
-+    )
-+    dag_beta = DAGSpec(
-+        id="dag_beta",
-+        steps=[
-+            StepSpec(
-+                id="compute",
-+                executor_type=ExecutorType.CUSTOM,
-+                memoization=MemoizationPolicySpec(enabled=True),
-+            )
-+        ],
-+    )
-+
-+    await runner_instance.run_async(dag_alpha)
-+    await runner_instance.run_async(dag_beta)
-+    assert counter.calls == 2
-+
-+    dag_multi_step = DAGSpec(
-+        id="dag_multi_step",
-+        steps=[
-+            StepSpec(
-+                id="step_one",
-+                executor_type=ExecutorType.CUSTOM,
-+                memoization=MemoizationPolicySpec(enabled=True),
-+            ),
-+            StepSpec(
-+                id="step_two",
-+                executor_type=ExecutorType.CUSTOM,
-+                memoization=MemoizationPolicySpec(enabled=True),
-+            ),
-+        ],
-+    )
-+    await runner_instance.run_async(dag_multi_step)
-+    assert counter.calls == 4
-+
-+
-+@pytest.mark.asyncio
-+async def test_explicit_key_shares_namespace_and_hits_cache() -> None:
-+    """Verify that an explicit key provides a stable namespace and hits cache across runs."""
-+    runner_instance, counter = create_test_runner()
-+    dag_spec = build_test_dag(cache_key="my_custom_namespace")
-+
-+    first_run = await runner_instance.run_async(dag_spec)
-+    second_run = await runner_instance.run_async(dag_spec)
-+
-+    assert counter.calls == 1
-+    assert first_run.outputs["work"]["call"] == 1
-+    assert second_run.outputs["work"]["call"] == 1
-diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
-new file mode 100644
-index 0000000..7116bc8
---- /dev/null
-+++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,508 @@
-+"""Additional contract coverage for the public ResultCache surface.
-+
-+This module validates detailed boundary contracts for ResultCache methods,
-+key namespace management, statistics isolation, and workflow interaction.
-+"""
-+
-+import asyncio
-+import dataclasses
-+import inspect
-+from typing import Any
-+
-+import pytest
-+
-+from basalt.core.dag.ast import DAGSpec, ExecutorType, MemoizationPolicySpec, StepSpec
-+from basalt.core.engine.hooks import HookRegistry, LifecycleEvent
-+from basalt.core.engine.memoization import ResultCache
-+from basalt.core.engine.memoization_admin import (
-+    CacheAdministration,
-+    CacheSummary,
-+)
-+from basalt.core.engine.runner import WorkflowRunner
-+from basalt.core.executors.base import BaseExecutor
-+from basalt.core.executors.pool import ExecutorFactory, WorkerPool
-+
-+
-+async def _resolve(val: Any) -> Any:
-+    """Await value if awaitable, otherwise return directly for implementation breadth."""
-+    if inspect.isawaitable(val):
-+        return await val
-+    return val
-+
-+
-+class DedicatedWorker(BaseExecutor):
-+    """Worker recording execution sequence and arguments."""
-+
-+    def __init__(self) -> None:
-+        super().__init__("custom")
-+        self.invocation_count: int = 0
-+        self.history: list[dict[str, Any]] = []
-+
-+    async def execute(self, step: StepSpec, context: Any) -> dict[str, Any]:
-+        self.invocation_count += 1
-+        output = {
-+            "index": self.invocation_count,
-+            "step_name": step.id,
-+            "params": step.parameters.copy() if step.parameters else {},
-+        }
-+        self.history.append(output)
-+        return output
-+
-+
-+@pytest.mark.asyncio
-+async def test_keys_only_lists_live_entries() -> None:
-+    """Verify that keys() reports only non-expired live cache keys."""
-+    cache = ResultCache()
-+    await cache.put("persistent_key", {"status": "persists"})
-+    await cache.put("fleeting_key", {"status": "vanishes"}, ttl_seconds=0.01)
-+
-+    await asyncio.sleep(0.1)
-+    active_keys = await cache.keys()
-+
-+    assert active_keys == ["persistent_key"]
-+
-+
-+@pytest.mark.asyncio
-+async def test_invalidate_missing_key_reports_false() -> None:
-+    """Verify that invalidating a non-existent key returns False."""
-+    cache = ResultCache()
-+    result = await cache.invalidate("non_existent_key")
-+    assert result is False
-+
-+
-+@pytest.mark.asyncio
-+async def test_clear_leaves_zero_entries() -> None:
-+    """Verify that clear() resets all stored cache entries to zero."""
-+    cache = ResultCache()
-+    await cache.put("item_alpha", {"val": 1})
-+    await cache.put("item_beta", {"val": 2})
-+
-+    total_removed = await cache.clear()
-+
-+    assert total_removed == 2
-+    assert await cache.keys() == []
-+    stats = await cache.stats()
-+    assert stats == {"entries": 0, "hits": 0, "misses": 0}
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_overwriting_existing_key() -> None:
-+    """Verify that storing a new value for an existing key updates the cache entry."""
-+    cache = ResultCache()
-+    await cache.put("shared_key", {"generation": 1})
-+    first_read = await cache.get("shared_key")
-+    assert first_read == {"generation": 1}
-+
-+    await cache.put("shared_key", {"generation": 2})
-+    second_read = await cache.get("shared_key")
-+    assert second_read == {"generation": 2}
-+
-+    stats = await cache.stats()
-+    assert stats["entries"] == 1
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_deep_copy_isolation_nested_structures() -> None:
-+    """Verify that complex nested lists and dicts remain completely isolated."""
-+    cache = ResultCache()
-+    complex_data = {
-+        "metadata": {"version": 1, "tags": ["a", "b"]},
-+        "records": [{"id": 101, "scores": [95, 88]}],
-+    }
-+
-+    await cache.put("complex_key", complex_data)
-+    complex_data["metadata"]["tags"].append("c")
-+    complex_data["records"][0]["scores"].append(100)
-+
-+    stored = await cache.get("complex_key")
-+    assert stored["metadata"]["tags"] == ["a", "b"]
-+    assert stored["records"][0]["scores"] == [95, 88]
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_stats_hit_miss_counter_accuracy() -> None:
-+    """Verify that hits and misses increment monotonically with each operation."""
-+    cache = ResultCache()
-+
-+    for idx in range(3):
-+        await cache.get(f"missing_{idx}")
-+
-+    await cache.put("present_key", {"value": 42})
-+
-+    for _ in range(5):
-+        await cache.get("present_key")
-+
-+    stats = await cache.stats()
-+    assert stats["entries"] == 1
-+    assert stats["misses"] == 3
-+    assert stats["hits"] == 5
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_concurrent_operations() -> None:
-+    """Verify thread-safe concurrent reads and writes on the ResultCache."""
-+    cache = ResultCache()
-+
-+    async def writer_task(key: str, val: int) -> None:
-+        for offset in range(5):
-+            await cache.put(f"{key}_{offset}", {"data": val + offset})
-+
-+    async def reader_task(key: str) -> None:
-+        for offset in range(5):
-+            await cache.get(f"{key}_{offset}")
-+
-+    tasks = [
-+        writer_task("part_a", 10),
-+        writer_task("part_b", 20),
-+        reader_task("part_a"),
-+        reader_task("part_b"),
-+    ]
-+    await asyncio.gather(*tasks)
-+
-+    live_keys = await cache.keys()
-+    assert len(live_keys) == 10
-+
-+
-+@pytest.mark.asyncio
-+async def test_multi_step_workflow_partial_memoization() -> None:
-+    """Verify pipeline execution where some steps are memoized and others are not."""
-+    worker = DedicatedWorker()
-+    factory = ExecutorFactory()
-+    factory.register("custom", worker)
-+    worker_pool = WorkerPool(factory=factory)
-+    runner = WorkflowRunner(worker_pool=worker_pool, hook_registry=HookRegistry())
-+
-+    dag_spec = DAGSpec(
-+        id="mixed_dag",
-+        steps=[
-+            StepSpec(
-+                id="cached_step",
-+                executor_type=ExecutorType.CUSTOM,
-+                memoization=MemoizationPolicySpec(enabled=True, key="fixed_cache"),
-+            ),
-+            StepSpec(
-+                id="fresh_step",
-+                executor_type=ExecutorType.CUSTOM,
-+                memoization=MemoizationPolicySpec(enabled=False),
-+            ),
-+        ],
-+    )
-+
-+    await runner.run_async(dag_spec)
-+    assert worker.invocation_count == 2
-+
-+    await runner.run_async(dag_spec)
-+    # cached_step reuses output (0 calls), fresh_step runs again (1 call)
-+    assert worker.invocation_count == 3
-+
-+
-+@pytest.mark.asyncio
-+async def test_memoization_cache_hit_preserves_step_state() -> None:
-+    """Verify that a cache hit populates normal step output and completed state."""
-+    worker = DedicatedWorker()
-+    factory = ExecutorFactory()
-+    factory.register("custom", worker)
-+    worker_pool = WorkerPool(factory=factory)
-+    runner = WorkflowRunner(worker_pool=worker_pool, hook_registry=HookRegistry())
-+
-+    dag_spec = DAGSpec(
-+        id="state_dag",
-+        steps=[
-+            StepSpec(
-+                id="compute",
-+                executor_type=ExecutorType.CUSTOM,
-+                memoization=MemoizationPolicySpec(enabled=True, key="state_key"),
-+            )
-+        ],
-+    )
-+
-+    first_result = await runner.run_async(dag_spec)
-+    second_result = await runner.run_async(dag_spec)
-+
-+    assert second_result.outputs["compute"] == first_result.outputs["compute"]
-+    assert second_result.step_states["compute"].name in ("COMPLETED", "SUCCESS")
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_empty_dictionary_handling() -> None:
-+    """Verify that caching an empty dictionary works and behaves consistently."""
-+    cache = ResultCache()
-+    await cache.put("empty_payload", {})
-+    retrieved = await cache.get("empty_payload")
-+
-+    assert retrieved == {}
-+    assert isinstance(retrieved, dict)
-+
-+    stats = await cache.stats()
-+    assert stats["entries"] == 1
-+    assert stats["hits"] == 1
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_multiple_clears_idempotent() -> None:
-+    """Verify that calling clear on an already empty cache returns zero."""
-+    cache = ResultCache()
-+    first_clear = await cache.clear()
-+    assert first_clear == 0
-+
-+    await cache.put("temp_item", {"x": 10})
-+    second_clear = await cache.clear()
-+    assert second_clear == 1
-+
-+    third_clear = await cache.clear()
-+    assert third_clear == 0
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_diverse_data_types() -> None:
-+    """Verify that diverse JSON-compatible primitive types serialize correctly."""
-+    cache = ResultCache()
-+    payload = {
-+        "string_val": "hello world",
-+        "int_val": 42,
-+        "float_val": 3.14159,
-+        "bool_val": True,
-+        "none_val": None,
-+        "list_val": [1, "two", 3.0, False],
-+        "nested_dict": {"sub": "data"},
-+    }
-+
-+    await cache.put("diverse_key", payload)
-+    result = await cache.get("diverse_key")
-+
-+    assert result == payload
-+    assert result["nested_dict"] is not payload["nested_dict"]
-+    assert result["list_val"] is not payload["list_val"]
-+
-+
-+def test_memoization_policy_spec_equality_and_copies() -> None:
-+    """Verify that MemoizationPolicySpec supports equality comparisons."""
-+    policy_a = MemoizationPolicySpec(enabled=True, key="common", ttl_seconds=10.0, include_inputs=True)
-+    policy_b = MemoizationPolicySpec(enabled=True, key="common", ttl_seconds=10.0, include_inputs=True)
-+    policy_c = MemoizationPolicySpec(enabled=True, key="different", ttl_seconds=10.0, include_inputs=True)
-+
-+    assert policy_a == policy_b
-+    assert policy_a != policy_c
-+
-+
-+@pytest.mark.asyncio
-+async def test_display_metadata_does_not_bust_cache_identity() -> None:
-+    """Verify that changing display metadata (name, description) preserves cache hit."""
-+    worker = DedicatedWorker()
-+    factory = ExecutorFactory()
-+    factory.register("custom", worker)
-+    pool = WorkerPool(factory=factory)
-+    cache = ResultCache()
-+    runner = WorkflowRunner(worker_pool=pool, result_cache=cache)
-+
-+    policy = MemoizationPolicySpec(enabled=True, key="shared_display_meta")
-+    dag1 = DAGSpec(
-+        id="dag_meta1",
-+        steps=[
-+            StepSpec(
-+                id="work",
-+                executor_type=ExecutorType.CUSTOM,
-+                name="First Display Name",
-+                description="First description",
-+                memoization=policy,
-+            )
-+        ],
-+    )
-+    dag2 = DAGSpec(
-+        id="dag_meta2",
-+        steps=[
-+            StepSpec(
-+                id="work",
-+                executor_type=ExecutorType.CUSTOM,
-+                name="Second Display Name",
-+                description="Second description",
-+                memoization=policy,
-+            )
-+        ],
-+    )
-+
-+    await runner.run_async(dag1)
-+    await runner.run_async(dag2)
-+
-+    assert worker.invocation_count == 1
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_administration_summary_empty() -> None:
-+    """Verify that CacheAdministration.summary reports zero counts and empty keys."""
-+    assert dataclasses.is_dataclass(CacheSummary)
-+    cache = ResultCache()
-+    admin = CacheAdministration(cache)
-+    summary = await _resolve(admin.summary())
-+    assert isinstance(summary, CacheSummary)
-+    assert summary.entries == 0
-+    assert summary.hits == 0
-+    assert summary.misses == 0
-+    assert summary.hit_rate == 0.0
-+    assert isinstance(summary.keys, tuple)
-+    assert summary.keys == ()
-+    as_dict = summary.as_dict()
-+    assert as_dict["entries"] == 0
-+    assert as_dict["hits"] == 0
-+    assert as_dict["misses"] == 0
-+    assert as_dict["hit_rate"] == 0.0
-+    assert isinstance(as_dict["keys"], (list, tuple))
-+    assert list(as_dict["keys"]) == []
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_administration_summary_with_hits_and_misses() -> None:
-+    """Verify that summary aggregates hits, misses, keys, and hit rate correctly."""
-+    assert dataclasses.is_dataclass(CacheSummary)
-+    cache = ResultCache()
-+    admin = CacheAdministration(cache)
-+    await cache.put("key_b", {"val": 2})
-+    await cache.put("key_a", {"val": 1})
-+    await cache.get("key_a")
-+    await cache.get("missing_key")
-+
-+    summary = await _resolve(admin.summary())
-+    assert isinstance(summary, CacheSummary)
-+    assert summary.entries == 2
-+    assert summary.hits == 1
-+    assert summary.misses == 1
-+    assert summary.hit_rate == 0.5
-+    assert isinstance(summary.keys, tuple)
-+    assert set(summary.keys) == {"key_a", "key_b"}
-+    as_dict = summary.as_dict()
-+    assert isinstance(as_dict["keys"], (list, tuple))
-+    assert set(as_dict["keys"]) == {"key_a", "key_b"}
-+    assert as_dict["hit_rate"] == 0.5
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_administration_contains_live_and_expired() -> None:
-+    """Verify that contains() reports True for live keys and False for missing or expired keys."""
-+    cache = ResultCache()
-+    admin = CacheAdministration(cache)
-+    await cache.put("live_key", {"state": "alive"})
-+    await cache.put("ephemeral_key", {"state": "dead"}, ttl_seconds=0.01)
-+
-+    assert await _resolve(admin.contains("live_key")) is True
-+    assert await _resolve(admin.contains("non_existent")) is False
-+
-+    await asyncio.sleep(0.1)
-+    assert await _resolve(admin.contains("ephemeral_key")) is False
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_administration_invalidate_prefix() -> None:
-+    """Verify that invalidate_prefix removes only matching keys and returns the count."""
-+    cache = ResultCache()
-+    admin = CacheAdministration(cache)
-+    await cache.put("app:tenant1:step1", {"data": 1})
-+    await cache.put("app:tenant1:step2", {"data": 2})
-+    await cache.put("app:tenant2:step1", {"data": 3})
-+    await cache.put("other:step", {"data": 4})
-+
-+    removed = await _resolve(admin.invalidate_prefix("app:tenant1:"))
-+    assert removed == 2
-+    active = set(await cache.keys())
-+    assert active == {"app:tenant2:step1", "other:step"}
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_administration_invalidate_many_deduplicates() -> None:
-+    """Verify that invalidate_many handles duplicates and non-existent keys properly."""
-+    cache = ResultCache()
-+    admin = CacheAdministration(cache)
-+    await cache.put("k1", {"data": 1})
-+    await cache.put("k2", {"data": 2})
-+    await cache.put("k3", {"data": 3})
-+
-+    removed = await _resolve(admin.invalidate_many(["k1", "k1", "k2", "unknown", "k2"]))
-+    assert removed == 2
-+    assert await cache.keys() == ["k3"]
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_administration_keys_filtering() -> None:
-+    """Verify that CacheAdministration.keys returns sorted keys and filters by prefix."""
-+    cache = ResultCache()
-+    admin = CacheAdministration(cache)
-+    await cache.put("b_key", {"data": 1})
-+    await cache.put("a_key", {"data": 2})
-+    await cache.put("tenant1:step1", {"data": 3})
-+    await cache.put("tenant1:step2", {"data": 4})
-+
-+    assert list(await _resolve(admin.keys())) == ["a_key", "b_key", "tenant1:step1", "tenant1:step2"]
-+    assert list(await _resolve(admin.keys(prefix="tenant1:"))) == ["tenant1:step1", "tenant1:step2"]
-+    assert list(await _resolve(admin.keys(prefix="unknown:"))) == []
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_administration_keys_purges_expired() -> None:
-+    """Verify that CacheAdministration.keys returns only active keys after expiration."""
-+    cache = ResultCache()
-+    admin = CacheAdministration(cache)
-+    await cache.put("live_key", {"data": 1})
-+    await cache.put("expired_key", {"data": 2}, ttl_seconds=0.01)
-+
-+    await asyncio.sleep(0.1)
-+    assert list(await _resolve(admin.keys())) == ["live_key"]
-+
-+
-+def test_cache_summary_dataclass_contract() -> None:
-+    """Verify that CacheSummary is a dataclass whose keys field is a tuple."""
-+    assert dataclasses.is_dataclass(CacheSummary)
-+    summary = CacheSummary(entries=1, hits=1, misses=0, hit_rate=1.0, keys=("k1", "k2"))
-+    assert isinstance(summary.keys, tuple)
-+    assert summary.keys == ("k1", "k2")
-+    as_dict = summary.as_dict()
-+    assert isinstance(as_dict["keys"], (list, tuple))
-+    assert list(as_dict["keys"]) == ["k1", "k2"]
-+
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_expired_get_increments_misses_and_removes_entry() -> None:
-+    """Verify that get() on an expired key increments misses and removes the entry from the cache."""
-+    cache = ResultCache()
-+    await cache.put("item_expired", {"v": 100}, ttl_seconds=0.01)
-+    await asyncio.sleep(0.1)
-+
-+    # Calling get() on an expired key must return None
-+    assert await cache.get("item_expired") is None
-+
-+    # Calling invalidate() immediately after get() must return False because get() purged it
-+    assert await cache.invalidate("item_expired") is False
-+
-+    # Calling stats() must report misses=1 and entries=0
-+    stats = await cache.stats()
-+    assert stats["misses"] == 1
-+    assert stats["hits"] == 0
-+    assert stats["entries"] == 0
-+
-+@pytest.mark.asyncio
-+async def test_result_cache_purge_expired() -> None:
-+    """Verify that purge_expired() removes expired entries and returns the count removed."""
-+    cache = ResultCache()
-+    await cache.put("live_key", {"v": 1})
-+    await cache.put("expired_1", {"v": 2}, ttl_seconds=0.01)
-+    await cache.put("expired_2", {"v": 3}, ttl_seconds=0.01)
-+    await asyncio.sleep(0.1)
-+
-+    removed = await cache.purge_expired()
-+    assert removed == 2
-+    assert await cache.keys() == ["live_key"]
-+    assert await cache.purge_expired() == 0
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_administration_evict_expired() -> None:
-+    """Verify that evict_expired() purges expired entries and returns the count removed."""
-+    cache = ResultCache()
-+    admin = CacheAdministration(cache)
-+    await cache.put("active_item", {"data": 10})
-+    await cache.put("stale_item_1", {"data": 20}, ttl_seconds=0.01)
-+    await cache.put("stale_item_2", {"data": 30}, ttl_seconds=0.01)
-+    await asyncio.sleep(0.1)
-+
-+    evicted = await _resolve(admin.evict_expired())
-+    assert evicted == 2
-+    assert list(await _resolve(admin.keys())) == ["active_item"]
-+    assert await _resolve(admin.evict_expired()) == 0
++async def test_failed_results_are_not_cached():
++    runner, executor = make_runner(CountingExecutor(fail=True))
++    await runner.run_async(make_dag())
++    await runner.run_async(make_dag())
++    assert executor.calls == 2
