@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..e1a462f
 --- /dev/null
 +++ b/tests/test_run_event_timeline.py
-@@ -0,0 +1,356 @@
+@@ -0,0 +1,363 @@
 +"""Behavioral coverage for standalone run event timelines."""
 +
 +from datetime import UTC, datetime, timedelta, timezone
@@ -305,6 +305,8 @@ index 0000000..e1a462f
 +    assert summary.last_timestamp is None
 +    assert summary.terminal_type is None
 +    assert summary.elapsed_ms is None
++    assert summary.event_counts == {}
++    assert summary.step_counts == {}
 +    assert summary.has_failures() is False
 +    assert summary.has_skips() is False
 +
@@ -312,9 +314,11 @@ index 0000000..e1a462f
 +def test_summary_counts_events_and_steps():
 +    summary = populated_timeline().summarize()
 +    assert summary.total_events == 6
++    assert summary.event_counts[RunEventType("workflow_started")] == 1
 +    assert summary.event_counts[RunEventType("step_started")] == 2
 +    assert summary.event_counts[RunEventType("step_succeeded")] == 1
 +    assert summary.event_counts[RunEventType("step_failed")] == 1
++    assert summary.event_counts[RunEventType("workflow_failed")] == 1
 +    assert summary.step_counts == {"extract": 2, "load": 2}
 +
 +
@@ -346,6 +350,9 @@ index 0000000..e1a462f
 +    summary = timeline.summarize()
 +    assert summary.skipped_step_ids == ["beta", "alpha"]
 +    assert summary.step_counts == {"beta": 1, "alpha": 1}
++    assert summary.event_counts[RunEventType("workflow_started")] == 1
++    assert summary.event_counts[RunEventType("step_skipped")] == 2
++    assert summary.event_counts[RunEventType("workflow_succeeded")] == 1
 +    assert summary.has_skips() is True
 +    assert summary.has_failures() is False
 +
@@ -366,7 +373,7 @@ new file mode 100644
 index 0000000..9e6d337
 --- /dev/null
 +++ b/tests/test_run_event_queries.py
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,277 @@
 +"""Public query and summary behavior for run timelines."""
 +
 +from datetime import UTC, datetime, timedelta, timezone
@@ -564,8 +571,12 @@ index 0000000..9e6d337
 +    summary = sample().summarize()
 +    assert summary.total_events == 7
 +    assert summary.step_counts == {"fetch": 2, "store": 2, "notify": 1}
++    assert summary.event_counts[RunEventType("workflow_started")] == 1
 +    assert summary.event_counts[RunEventType("step_started")] == 2
++    assert summary.event_counts[RunEventType("step_succeeded")] == 1
 +    assert summary.event_counts[RunEventType("step_failed")] == 1
++    assert summary.event_counts[RunEventType("step_skipped")] == 1
++    assert summary.event_counts[RunEventType("workflow_failed")] == 1
 +
 +
 +def test_summary_reports_step_lists_in_observation_order():
