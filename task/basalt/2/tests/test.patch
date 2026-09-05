@@ -709,10 +709,10 @@ index 0000000..ec2a6ec
 +    assert second_run.outputs["work"]["call"] == 1
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..43e53fb
+index 0000000..2a2a084
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,470 @@
+@@ -0,0 +1,478 @@
 +"""Additional contract coverage for the public ResultCache surface.
 +
 +This module validates detailed boundary contracts for ResultCache methods,
@@ -721,6 +721,7 @@ index 0000000..43e53fb
 +
 +import asyncio
 +import dataclasses
++import inspect
 +from typing import Any
 +
 +import pytest
@@ -735,6 +736,13 @@ index 0000000..43e53fb
 +from basalt.core.engine.runner import WorkflowRunner
 +from basalt.core.executors.base import BaseExecutor
 +from basalt.core.executors.pool import ExecutorFactory, WorkerPool
++
++
++async def _resolve(val: Any) -> Any:
++    """Await value if awaitable, otherwise return directly for implementation breadth."""
++    if inspect.isawaitable(val):
++        return await val
++    return val
 +
 +
 +class DedicatedWorker(BaseExecutor):
@@ -1040,7 +1048,7 @@ index 0000000..43e53fb
 +    assert dataclasses.is_dataclass(CacheSummary)
 +    cache = ResultCache()
 +    admin = CacheAdministration(cache)
-+    summary = await admin.summary()
++    summary = await _resolve(admin.summary())
 +    assert isinstance(summary, CacheSummary)
 +    assert summary.entries == 0
 +    assert summary.hits == 0
@@ -1053,8 +1061,8 @@ index 0000000..43e53fb
 +    assert as_dict["hits"] == 0
 +    assert as_dict["misses"] == 0
 +    assert as_dict["hit_rate"] == 0.0
-+    assert isinstance(as_dict["keys"], list)
-+    assert as_dict["keys"] == []
++    assert isinstance(as_dict["keys"], (list, tuple))
++    assert list(as_dict["keys"]) == []
 +
 +
 +@pytest.mark.asyncio
@@ -1068,7 +1076,7 @@ index 0000000..43e53fb
 +    await cache.get("key_a")
 +    await cache.get("missing_key")
 +
-+    summary = await admin.summary()
++    summary = await _resolve(admin.summary())
 +    assert isinstance(summary, CacheSummary)
 +    assert summary.entries == 2
 +    assert summary.hits == 1
@@ -1077,7 +1085,7 @@ index 0000000..43e53fb
 +    assert isinstance(summary.keys, tuple)
 +    assert set(summary.keys) == {"key_a", "key_b"}
 +    as_dict = summary.as_dict()
-+    assert isinstance(as_dict["keys"], list)
++    assert isinstance(as_dict["keys"], (list, tuple))
 +    assert set(as_dict["keys"]) == {"key_a", "key_b"}
 +    assert as_dict["hit_rate"] == 0.5
 +
@@ -1090,11 +1098,11 @@ index 0000000..43e53fb
 +    await cache.put("live_key", {"state": "alive"})
 +    await cache.put("ephemeral_key", {"state": "dead"}, ttl_seconds=0.01)
 +
-+    assert await admin.contains("live_key") is True
-+    assert await admin.contains("non_existent") is False
++    assert await _resolve(admin.contains("live_key")) is True
++    assert await _resolve(admin.contains("non_existent")) is False
 +
 +    await asyncio.sleep(0.1)
-+    assert await admin.contains("ephemeral_key") is False
++    assert await _resolve(admin.contains("ephemeral_key")) is False
 +
 +
 +@pytest.mark.asyncio
@@ -1107,7 +1115,7 @@ index 0000000..43e53fb
 +    await cache.put("app:tenant2:step1", {"data": 3})
 +    await cache.put("other:step", {"data": 4})
 +
-+    removed = await admin.invalidate_prefix("app:tenant1:")
++    removed = await _resolve(admin.invalidate_prefix("app:tenant1:"))
 +    assert removed == 2
 +    active = set(await cache.keys())
 +    assert active == {"app:tenant2:step1", "other:step"}
@@ -1122,7 +1130,7 @@ index 0000000..43e53fb
 +    await cache.put("k2", {"data": 2})
 +    await cache.put("k3", {"data": 3})
 +
-+    removed = await admin.invalidate_many(["k1", "k1", "k2", "unknown", "k2"])
++    removed = await _resolve(admin.invalidate_many(["k1", "k1", "k2", "unknown", "k2"]))
 +    assert removed == 2
 +    assert await cache.keys() == ["k3"]
 +
@@ -1137,9 +1145,9 @@ index 0000000..43e53fb
 +    await cache.put("tenant1:step1", {"data": 3})
 +    await cache.put("tenant1:step2", {"data": 4})
 +
-+    assert await admin.keys() == ["a_key", "b_key", "tenant1:step1", "tenant1:step2"]
-+    assert await admin.keys(prefix="tenant1:") == ["tenant1:step1", "tenant1:step2"]
-+    assert await admin.keys(prefix="unknown:") == []
++    assert list(await _resolve(admin.keys())) == ["a_key", "b_key", "tenant1:step1", "tenant1:step2"]
++    assert list(await _resolve(admin.keys(prefix="tenant1:"))) == ["tenant1:step1", "tenant1:step2"]
++    assert list(await _resolve(admin.keys(prefix="unknown:"))) == []
 +
 +
 +@pytest.mark.asyncio
@@ -1151,7 +1159,7 @@ index 0000000..43e53fb
 +    await cache.put("expired_key", {"data": 2}, ttl_seconds=0.01)
 +
 +    await asyncio.sleep(0.1)
-+    assert await admin.keys() == ["live_key"]
++    assert list(await _resolve(admin.keys())) == ["live_key"]
 +
 +
 +def test_cache_summary_dataclass_contract() -> None:
@@ -1161,8 +1169,8 @@ index 0000000..43e53fb
 +    assert isinstance(summary.keys, tuple)
 +    assert summary.keys == ("k1", "k2")
 +    as_dict = summary.as_dict()
-+    assert isinstance(as_dict["keys"], list)
-+    assert as_dict["keys"] == ["k1", "k2"]
++    assert isinstance(as_dict["keys"], (list, tuple))
++    assert list(as_dict["keys"]) == ["k1", "k2"]
 +
 +
 +@pytest.mark.asyncio
