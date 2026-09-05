@@ -704,10 +704,10 @@ index 0000000..ebeec44
 +    assert second_run.outputs["work"]["call"] == 1
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..9572d8f
+index 0000000..bab2951
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,430 @@
+@@ -0,0 +1,456 @@
 +"""Additional contract coverage for the public ResultCache surface.
 +
 +This module validates detailed boundary contracts for ResultCache methods,
@@ -722,7 +722,11 @@ index 0000000..9572d8f
 +from basalt.core.dag.ast import DAGSpec, ExecutorType, MemoizationPolicySpec, StepSpec
 +from basalt.core.engine.hooks import HookRegistry, LifecycleEvent
 +from basalt.core.engine.memoization import ResultCache
-+from basalt.core.engine.memoization_admin import CacheAdministration, CacheSummary
++from basalt.core.engine.memoization_admin import (
++    CacheAdministration,
++    CacheNamespace,
++    CacheSummary,
++)
 +from basalt.core.engine.runner import WorkflowRunner
 +from basalt.core.executors.base import BaseExecutor
 +from basalt.core.executors.pool import ExecutorFactory, WorkerPool
@@ -1110,31 +1114,53 @@ index 0000000..9572d8f
 +    assert await cache.keys() == ["k3"]
 +
 +
++def test_cache_namespace_key_and_validation() -> None:
++    """Verify that CacheNamespace validates empty names and generates formatted keys."""
++    with pytest.raises(ValueError):
++        CacheNamespace("")
++    with pytest.raises(ValueError):
++        CacheNamespace("   ")
++    with pytest.raises(ValueError):
++        CacheNamespace(":::")
++
++    ns = CacheNamespace("orders")
++    with pytest.raises(ValueError):
++        ns.key("")
++    with pytest.raises(ValueError):
++        ns.key("   ")
++
++    assert ns.key("report") == "orders:report"
++    assert ns.key("  report  ") == "orders:report"
++
++
 +@pytest.mark.asyncio
-+async def test_cache_administration_reset_statistics() -> None:
-+    """Verify that reset_statistics clears cache entries but preserves lifetime hit/miss counters."""
++async def test_cache_namespace_operations() -> None:
++    """Verify that get, put, and invalidate operate correctly through a namespace adapter."""
 +    cache = ResultCache()
-+    admin = CacheAdministration(cache)
-+    await cache.put("key_a", {"val": 1})
-+    await cache.put("key_b", {"val": 2})
-+    await cache.get("key_a")
-+    await cache.get("missing_key")
++    ns = CacheNamespace("orders")
 +
-+    initial_summary = await admin.summary()
-+    assert initial_summary.entries == 2
-+    assert initial_summary.hits == 1
-+    assert initial_summary.misses == 1
++    await ns.put(cache, "ord_1", {"total": 100})
++    assert await ns.get(cache, "ord_1") == {"total": 100}
++    assert await cache.get("orders:ord_1") == {"total": 100}
 +
-+    reset_summary = await admin.reset_statistics()
-+    assert reset_summary.entries == 0
-+    assert reset_summary.hits == 1
-+    assert reset_summary.misses == 1
-+    assert reset_summary.hit_rate == 0.5
-+    assert len(reset_summary.keys) == 0
-+    as_dict = reset_summary.as_dict()
-+    assert as_dict["entries"] == 0
-+    assert as_dict["hits"] == 1
-+    assert as_dict["misses"] == 1
-+    assert as_dict["hit_rate"] == 0.5
-+    assert len(as_dict["keys"]) == 0
-+    assert await cache.keys() == []
++    assert await ns.invalidate(cache, "ord_1") is True
++    assert await ns.get(cache, "ord_1") is None
++    assert await cache.get("orders:ord_1") is None
++
++
++@pytest.mark.asyncio
++async def test_cache_namespace_clear_isolated() -> None:
++    """Verify that clear only purges entries within its own namespace prefix."""
++    cache = ResultCache()
++    ns1 = CacheNamespace("ns1")
++    ns2 = CacheNamespace("ns2")
++
++    await ns1.put(cache, "item_a", {"x": 1})
++    await ns1.put(cache, "item_b", {"x": 2})
++    await ns2.put(cache, "item_c", {"x": 3})
++
++    removed = await ns1.clear(cache)
++    assert removed == 2
++    assert await ns1.get(cache, "item_a") is None
++    assert await ns1.get(cache, "item_b") is None
++    assert await ns2.get(cache, "item_c") == {"x": 3}
