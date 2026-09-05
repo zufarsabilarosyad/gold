@@ -55,10 +55,10 @@ index 0861b14..794f99f 100644
          self.register(LifecycleEvent.STEP_SKIPPED, callback)
 diff --git a/src/basalt/core/engine/memoization.py b/src/basalt/core/engine/memoization.py
 new file mode 100644
-index 0000000..376cc0b
+index 0000000..bbeb411
 --- /dev/null
 +++ b/src/basalt/core/engine/memoization.py
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,163 @@
 +"""Small, concurrency-safe result cache used by :class:`WorkflowRunner`.
 +
 +The cache deliberately stores only JSON-like successful executor outputs.  It is
@@ -176,8 +176,6 @@ index 0000000..376cc0b
 +
 +    async def put(self, key: str, output: dict[str, Any], ttl_seconds: float | None = None) -> CacheEntry:
 +        """Store an output and return the stored entry metadata."""
-+        if ttl_seconds is not None and ttl_seconds <= 0:
-+            raise ValueError("ttl_seconds must be positive")
 +        now = time.monotonic()
 +        entry = CacheEntry(
 +            key=key,
