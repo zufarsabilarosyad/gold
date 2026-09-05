@@ -704,10 +704,10 @@ index 0000000..ebeec44
 +    assert second_run.outputs["work"]["call"] == 1
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..d9b50a6
+index 0000000..d1ccf25
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,446 @@
+@@ -0,0 +1,430 @@
 +"""Additional contract coverage for the public ResultCache surface.
 +
 +This module validates detailed boundary contracts for ResultCache methods,
@@ -724,7 +724,6 @@ index 0000000..d9b50a6
 +from basalt.core.engine.memoization import ResultCache
 +from basalt.core.engine.memoization_admin import (
 +    CacheAdministration,
-+    CacheNamespace,
 +    CacheSummary,
 +)
 +from basalt.core.engine.runner import WorkflowRunner
@@ -1114,43 +1113,28 @@ index 0000000..d9b50a6
 +    assert await cache.keys() == ["k3"]
 +
 +
-+def test_cache_namespace_key_and_validation() -> None:
-+    """Verify that CacheNamespace validates empty names and generates formatted keys."""
-+    with pytest.raises(ValueError):
-+        CacheNamespace("")
++@pytest.mark.asyncio
++async def test_cache_administration_keys_filtering() -> None:
++    """Verify that CacheAdministration.keys returns sorted keys and filters by prefix."""
++    cache = ResultCache()
++    admin = CacheAdministration(cache)
++    await cache.put("b_key", {"data": 1})
++    await cache.put("a_key", {"data": 2})
++    await cache.put("tenant1:step1", {"data": 3})
++    await cache.put("tenant1:step2", {"data": 4})
 +
-+    ns = CacheNamespace("orders")
-+    assert ns.key("report") == "orders:report"
++    assert await admin.keys() == ["a_key", "b_key", "tenant1:step1", "tenant1:step2"]
++    assert await admin.keys(prefix="tenant1:") == ["tenant1:step1", "tenant1:step2"]
++    assert await admin.keys(prefix="unknown:") == []
 +
 +
 +@pytest.mark.asyncio
-+async def test_cache_namespace_operations() -> None:
-+    """Verify that get, put, and invalidate operate correctly through a namespace adapter."""
++async def test_cache_administration_keys_purges_expired() -> None:
++    """Verify that CacheAdministration.keys returns only active keys after expiration."""
 +    cache = ResultCache()
-+    ns = CacheNamespace("orders")
++    admin = CacheAdministration(cache)
++    await cache.put("live_key", {"data": 1})
++    await cache.put("expired_key", {"data": 2}, ttl_seconds=0.01)
 +
-+    await ns.put(cache, "ord_1", {"total": 100})
-+    assert await ns.get(cache, "ord_1") == {"total": 100}
-+    assert await cache.get("orders:ord_1") == {"total": 100}
-+
-+    assert await ns.invalidate(cache, "ord_1") is True
-+    assert await ns.get(cache, "ord_1") is None
-+    assert await cache.get("orders:ord_1") is None
-+
-+
-+@pytest.mark.asyncio
-+async def test_cache_namespace_clear_isolated() -> None:
-+    """Verify that clear only purges entries within its own namespace prefix."""
-+    cache = ResultCache()
-+    ns1 = CacheNamespace("ns1")
-+    ns2 = CacheNamespace("ns2")
-+
-+    await ns1.put(cache, "item_a", {"x": 1})
-+    await ns1.put(cache, "item_b", {"x": 2})
-+    await ns2.put(cache, "item_c", {"x": 3})
-+
-+    removed = await ns1.clear(cache)
-+    assert removed == 2
-+    assert await ns1.get(cache, "item_a") is None
-+    assert await ns1.get(cache, "item_b") is None
-+    assert await ns2.get(cache, "item_c") == {"x": 3}
++    await asyncio.sleep(0.05)
++    assert await admin.keys() == ["live_key"]

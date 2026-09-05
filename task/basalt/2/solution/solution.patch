@@ -216,10 +216,10 @@ index 0000000..5aa77fe
 +            return {"entries": len(self._entries), "hits": self._hits, "misses": self._misses}
 diff --git a/src/basalt/core/engine/memoization_admin.py b/src/basalt/core/engine/memoization_admin.py
 new file mode 100644
-index 0000000..167b02e
+index 0000000..b7543e6
 --- /dev/null
 +++ b/src/basalt/core/engine/memoization_admin.py
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,153 @@
 +"""Administration helpers for observing and managing result caches.
 +
 +These helpers are intentionally separate from execution.  Web applications,
@@ -289,53 +289,12 @@ index 0000000..167b02e
 +        """Remove every live key beginning with *prefix*."""
 +        return await self.invalidate_many([key for key in await self.cache.keys() if key.startswith(prefix)])
 +
-+    async def reset_statistics(self) -> CacheSummary:
-+        """Clear values and return the empty cache summary.
-+
-+        ResultCache counters intentionally describe process lifetime; clearing
-+        values does not erase usage history.  This method is named for the
-+        common operational action of resetting the cache working set.
-+        """
-+        await self.cache.clear()
-+        return await self.summary()
-+
-+
-+class CacheNamespace:
-+    """A tiny key adapter for clients that want readable cache grouping.
-+
-+    It does not replace the runner's cryptographic identity.  Instead, clients
-+    can use it when interacting with `ResultCache` directly for companion
-+    values such as precomputed metadata or manually memoized calculations.
-+    """
-+
-+    def __init__(self, name: str) -> None:
-+        clean = str(name).strip().strip(":")
-+        if not clean:
-+            raise ValueError("cache namespace must not be empty")
-+        self.name = clean
-+
-+    def key(self, name: str) -> str:
-+        """Build a canonical namespaced key."""
-+        clean = str(name).strip().strip(":")
-+        if not clean:
-+            raise ValueError("cache key name must not be empty")
-+        return f"{self.name}:{clean}"
-+
-+    async def get(self, cache: ResultCache, name: str) -> dict[str, Any] | None:
-+        """Fetch one namespaced value."""
-+        return await cache.get(self.key(name))
-+
-+    async def put(self, cache: ResultCache, name: str, output: dict[str, Any], ttl_seconds: float | None = None) -> None:
-+        """Store one namespaced value."""
-+        await cache.put(self.key(name), output, ttl_seconds)
-+
-+    async def invalidate(self, cache: ResultCache, name: str) -> bool:
-+        """Delete one namespaced value."""
-+        return await cache.invalidate(self.key(name))
-+
-+    async def clear(self, cache: ResultCache) -> int:
-+        """Delete all values belonging to this namespace."""
-+        return await CacheAdministration(cache).invalidate_prefix(f"{self.name}:")
++    async def keys(self, prefix: str | None = None) -> list[str]:
++        """Return a sorted list of active keys, optionally filtered by prefix."""
++        active = sorted(await self.cache.keys())
++        if prefix is None:
++            return active
++        return [key for key in active if key.startswith(prefix)]
 +
 +
 +@dataclass(frozen=True)

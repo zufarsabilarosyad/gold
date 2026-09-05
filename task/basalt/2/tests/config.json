@@ -50,9 +50,8 @@
     "tests.test_result_memoization_contract_notes.test_cache_administration_contains_live_and_expired",
     "tests.test_result_memoization_contract_notes.test_cache_administration_invalidate_prefix",
     "tests.test_result_memoization_contract_notes.test_cache_administration_invalidate_many_deduplicates",
-    "tests.test_result_memoization_contract_notes.test_cache_namespace_key_and_validation",
-    "tests.test_result_memoization_contract_notes.test_cache_namespace_operations",
-    "tests.test_result_memoization_contract_notes.test_cache_namespace_clear_isolated"
+    "tests.test_result_memoization_contract_notes.test_cache_administration_keys_filtering",
+    "tests.test_result_memoization_contract_notes.test_cache_administration_keys_purges_expired"
   ],
   "p2p_node_ids": [
     "tests.test_context_evaluator.test_context_variable_path_resolution",
