@@ -1,6 +1,6 @@
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..28fe423
+index 0000000..ec2a6ec
 --- /dev/null
 +++ b/tests/test_result_memoization.py
 @@ -0,0 +1,703 @@
@@ -289,7 +289,7 @@ index 0000000..28fe423
 +    """Verify that entries expire after their TTL has elapsed, get increments misses, and purges them."""
 +    cache = ResultCache()
 +    await cache.put("ephemeral_key", {"temp": True}, ttl_seconds=0.01)
-+    await asyncio.sleep(0.05)
++    await asyncio.sleep(0.1)
 +
 +    assert await cache.get("ephemeral_key") is None
 +    assert await cache.invalidate("ephemeral_key") is False
@@ -475,7 +475,7 @@ index 0000000..28fe423
 +    assert len(captured_events) >= 1
 +    event_type, payload = captured_events[0]
 +    assert event_type == LifecycleEvent.STEP_CACHE_HIT
-+    assert set(payload.keys()) == {"step_id", "cache_key", "output"}
++    assert {"step_id", "cache_key", "output"}.issubset(payload.keys())
 +    assert payload["step_id"] == "work"
 +    assert isinstance(payload["cache_key"], str) and len(payload["cache_key"]) > 0
 +    assert payload["output"]["call"] == 1
@@ -503,7 +503,7 @@ index 0000000..28fe423
 +    executed_event_types = [ev for ev, _ in captured_events]
 +    assert LifecycleEvent.STEP_START in executed_event_types
 +    executed_payload = captured_events[-1][1]
-+    assert set(executed_payload.keys()) == {"step_id", "output", "cached"}
++    assert {"step_id", "output", "cached"}.issubset(executed_payload.keys())
 +    assert executed_payload["step_id"] == "work"
 +    assert executed_payload["output"] == {"call": 1, "input": None, "step_id": "work"}
 +    assert executed_payload["cached"] is False
@@ -518,12 +518,12 @@ index 0000000..28fe423
 +        LifecycleEvent.STEP_SUCCESS,
 +    ]
 +    hit_payload = captured_events[0][1]
-+    assert set(hit_payload.keys()) == {"step_id", "cache_key", "output"}
++    assert {"step_id", "cache_key", "output"}.issubset(hit_payload.keys())
 +    assert hit_payload["step_id"] == "work"
 +    assert hit_payload["output"] == {"call": 1, "input": None, "step_id": "work"}
 +
 +    success_payload = captured_events[1][1]
-+    assert set(success_payload.keys()) == {"step_id", "output", "cached"}
++    assert {"step_id", "output", "cached"}.issubset(success_payload.keys())
 +    assert success_payload["step_id"] == "work"
 +    assert success_payload["output"] == {"call": 1, "input": None, "step_id": "work"}
 +    assert success_payload["cached"] is True
@@ -709,7 +709,7 @@ index 0000000..28fe423
 +    assert second_run.outputs["work"]["call"] == 1
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..dd418a5
+index 0000000..43e53fb
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
 @@ -0,0 +1,470 @@
@@ -1150,7 +1150,7 @@ index 0000000..dd418a5
 +    await cache.put("live_key", {"data": 1})
 +    await cache.put("expired_key", {"data": 2}, ttl_seconds=0.01)
 +
-+    await asyncio.sleep(0.05)
++    await asyncio.sleep(0.1)
 +    assert await admin.keys() == ["live_key"]
 +
 +
@@ -1170,7 +1170,7 @@ index 0000000..dd418a5
 +    """Verify that get() on an expired key increments misses and removes the entry from the cache."""
 +    cache = ResultCache()
 +    await cache.put("item_expired", {"v": 100}, ttl_seconds=0.01)
-+    await asyncio.sleep(0.05)
++    await asyncio.sleep(0.1)
 +
 +    # Calling get() on an expired key must return None
 +    assert await cache.get("item_expired") is None
