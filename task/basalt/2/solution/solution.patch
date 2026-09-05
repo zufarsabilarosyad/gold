@@ -55,10 +55,10 @@ index 0861b14..794f99f 100644
          self.register(LifecycleEvent.STEP_SKIPPED, callback)
 diff --git a/src/basalt/core/engine/memoization.py b/src/basalt/core/engine/memoization.py
 new file mode 100644
-index 0000000..5aa77fe
+index 0000000..376cc0b
 --- /dev/null
 +++ b/src/basalt/core/engine/memoization.py
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,165 @@
 +"""Small, concurrency-safe result cache used by :class:`WorkflowRunner`.
 +
 +The cache deliberately stores only JSON-like successful executor outputs.  It is
@@ -176,6 +176,8 @@ index 0000000..5aa77fe
 +
 +    async def put(self, key: str, output: dict[str, Any], ttl_seconds: float | None = None) -> CacheEntry:
 +        """Store an output and return the stored entry metadata."""
++        if ttl_seconds is not None and ttl_seconds <= 0:
++            raise ValueError("ttl_seconds must be positive")
 +        now = time.monotonic()
 +        entry = CacheEntry(
 +            key=key,
@@ -186,6 +188,14 @@ index 0000000..5aa77fe
 +        async with self._lock:
 +            self._entries[key] = entry
 +        return entry
++
++    async def purge_expired(self) -> int:
++        """Purge expired entries and return the count removed."""
++        async with self._lock:
++            expired = [key for key, item in self._entries.items() if item.expired]
++            for key in expired:
++                del self._entries[key]
++            return len(expired)
 +
 +    async def invalidate(self, key: str) -> bool:
 +        """Delete one exact key and report whether it existed."""
@@ -216,10 +226,10 @@ index 0000000..5aa77fe
 +            return {"entries": len(self._entries), "hits": self._hits, "misses": self._misses}
 diff --git a/src/basalt/core/engine/memoization_admin.py b/src/basalt/core/engine/memoization_admin.py
 new file mode 100644
-index 0000000..b7543e6
+index 0000000..e40b726
 --- /dev/null
 +++ b/src/basalt/core/engine/memoization_admin.py
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,157 @@
 +"""Administration helpers for observing and managing result caches.
 +
 +These helpers are intentionally separate from execution.  Web applications,
@@ -288,6 +298,10 @@ index 0000000..b7543e6
 +    async def invalidate_prefix(self, prefix: str) -> int:
 +        """Remove every live key beginning with *prefix*."""
 +        return await self.invalidate_many([key for key in await self.cache.keys() if key.startswith(prefix)])
++
++    async def evict_expired(self) -> int:
++        """Purge all expired entries from cache and return count evicted."""
++        return await self.cache.purge_expired()
 +
 +    async def keys(self, prefix: str | None = None) -> list[str]:
 +        """Return a sorted list of active keys, optionally filtered by prefix."""

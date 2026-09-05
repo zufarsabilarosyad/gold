@@ -709,10 +709,10 @@ index 0000000..ec2a6ec
 +    assert second_run.outputs["work"]["call"] == 1
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..2a2a084
+index 0000000..f21873a
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,478 @@
+@@ -0,0 +1,511 @@
 +"""Additional contract coverage for the public ResultCache surface.
 +
 +This module validates detailed boundary contracts for ResultCache methods,
@@ -721,7 +721,6 @@ index 0000000..2a2a084
 +
 +import asyncio
 +import dataclasses
-+import inspect
 +from typing import Any
 +
 +import pytest
@@ -736,13 +735,6 @@ index 0000000..2a2a084
 +from basalt.core.engine.runner import WorkflowRunner
 +from basalt.core.executors.base import BaseExecutor
 +from basalt.core.executors.pool import ExecutorFactory, WorkerPool
-+
-+
-+async def _resolve(val: Any) -> Any:
-+    """Await value if awaitable, otherwise return directly for implementation breadth."""
-+    if inspect.isawaitable(val):
-+        return await val
-+    return val
 +
 +
 +class DedicatedWorker(BaseExecutor):
@@ -1048,7 +1040,7 @@ index 0000000..2a2a084
 +    assert dataclasses.is_dataclass(CacheSummary)
 +    cache = ResultCache()
 +    admin = CacheAdministration(cache)
-+    summary = await _resolve(admin.summary())
++    summary = await admin.summary()
 +    assert isinstance(summary, CacheSummary)
 +    assert summary.entries == 0
 +    assert summary.hits == 0
@@ -1076,7 +1068,7 @@ index 0000000..2a2a084
 +    await cache.get("key_a")
 +    await cache.get("missing_key")
 +
-+    summary = await _resolve(admin.summary())
++    summary = await admin.summary()
 +    assert isinstance(summary, CacheSummary)
 +    assert summary.entries == 2
 +    assert summary.hits == 1
@@ -1098,11 +1090,11 @@ index 0000000..2a2a084
 +    await cache.put("live_key", {"state": "alive"})
 +    await cache.put("ephemeral_key", {"state": "dead"}, ttl_seconds=0.01)
 +
-+    assert await _resolve(admin.contains("live_key")) is True
-+    assert await _resolve(admin.contains("non_existent")) is False
++    assert await admin.contains("live_key") is True
++    assert await admin.contains("non_existent") is False
 +
 +    await asyncio.sleep(0.1)
-+    assert await _resolve(admin.contains("ephemeral_key")) is False
++    assert await admin.contains("ephemeral_key") is False
 +
 +
 +@pytest.mark.asyncio
@@ -1115,7 +1107,7 @@ index 0000000..2a2a084
 +    await cache.put("app:tenant2:step1", {"data": 3})
 +    await cache.put("other:step", {"data": 4})
 +
-+    removed = await _resolve(admin.invalidate_prefix("app:tenant1:"))
++    removed = await admin.invalidate_prefix("app:tenant1:")
 +    assert removed == 2
 +    active = set(await cache.keys())
 +    assert active == {"app:tenant2:step1", "other:step"}
@@ -1130,7 +1122,7 @@ index 0000000..2a2a084
 +    await cache.put("k2", {"data": 2})
 +    await cache.put("k3", {"data": 3})
 +
-+    removed = await _resolve(admin.invalidate_many(["k1", "k1", "k2", "unknown", "k2"]))
++    removed = await admin.invalidate_many(["k1", "k1", "k2", "unknown", "k2"])
 +    assert removed == 2
 +    assert await cache.keys() == ["k3"]
 +
@@ -1145,9 +1137,9 @@ index 0000000..2a2a084
 +    await cache.put("tenant1:step1", {"data": 3})
 +    await cache.put("tenant1:step2", {"data": 4})
 +
-+    assert list(await _resolve(admin.keys())) == ["a_key", "b_key", "tenant1:step1", "tenant1:step2"]
-+    assert list(await _resolve(admin.keys(prefix="tenant1:"))) == ["tenant1:step1", "tenant1:step2"]
-+    assert list(await _resolve(admin.keys(prefix="unknown:"))) == []
++    assert list(await admin.keys()) == ["a_key", "b_key", "tenant1:step1", "tenant1:step2"]
++    assert list(await admin.keys(prefix="tenant1:")) == ["tenant1:step1", "tenant1:step2"]
++    assert list(await admin.keys(prefix="unknown:")) == []
 +
 +
 +@pytest.mark.asyncio
@@ -1159,7 +1151,7 @@ index 0000000..2a2a084
 +    await cache.put("expired_key", {"data": 2}, ttl_seconds=0.01)
 +
 +    await asyncio.sleep(0.1)
-+    assert list(await _resolve(admin.keys())) == ["live_key"]
++    assert list(await admin.keys()) == ["live_key"]
 +
 +
 +def test_cache_summary_dataclass_contract() -> None:
@@ -1191,3 +1183,44 @@ index 0000000..2a2a084
 +    assert stats["misses"] == 1
 +    assert stats["hits"] == 0
 +    assert stats["entries"] == 0
++
++
++@pytest.mark.asyncio
++async def test_result_cache_put_rejects_nonpositive_ttl() -> None:
++    """Verify that put() raises ValueError when ttl_seconds is zero or negative."""
++    cache = ResultCache()
++    with pytest.raises(ValueError):
++        await cache.put("zero_ttl", {"v": 1}, ttl_seconds=0)
++    with pytest.raises(ValueError):
++        await cache.put("neg_ttl", {"v": 2}, ttl_seconds=-1.0)
++
++
++@pytest.mark.asyncio
++async def test_result_cache_purge_expired() -> None:
++    """Verify that purge_expired() removes expired entries and returns the count removed."""
++    cache = ResultCache()
++    await cache.put("live_key", {"v": 1})
++    await cache.put("expired_1", {"v": 2}, ttl_seconds=0.01)
++    await cache.put("expired_2", {"v": 3}, ttl_seconds=0.01)
++    await asyncio.sleep(0.1)
++
++    removed = await cache.purge_expired()
++    assert removed == 2
++    assert await cache.keys() == ["live_key"]
++    assert await cache.purge_expired() == 0
++
++
++@pytest.mark.asyncio
++async def test_cache_administration_evict_expired() -> None:
++    """Verify that evict_expired() purges expired entries and returns the count removed."""
++    cache = ResultCache()
++    admin = CacheAdministration(cache)
++    await cache.put("active_item", {"data": 10})
++    await cache.put("stale_item_1", {"data": 20}, ttl_seconds=0.01)
++    await cache.put("stale_item_2", {"data": 30}, ttl_seconds=0.01)
++    await asyncio.sleep(0.1)
++
++    evicted = await admin.evict_expired()
++    assert evicted == 2
++    assert await admin.keys() == ["active_item"]
++    assert await admin.evict_expired() == 0

@@ -53,7 +53,10 @@
     "tests.test_result_memoization_contract_notes.test_cache_administration_keys_filtering",
     "tests.test_result_memoization_contract_notes.test_cache_administration_keys_purges_expired",
     "tests.test_result_memoization_contract_notes.test_cache_summary_dataclass_contract",
-    "tests.test_result_memoization_contract_notes.test_result_cache_expired_get_increments_misses_and_removes_entry"
+    "tests.test_result_memoization_contract_notes.test_result_cache_expired_get_increments_misses_and_removes_entry",
+    "tests.test_result_memoization_contract_notes.test_result_cache_put_rejects_nonpositive_ttl",
+    "tests.test_result_memoization_contract_notes.test_result_cache_purge_expired",
+    "tests.test_result_memoization_contract_notes.test_cache_administration_evict_expired"
   ],
   "p2p_node_ids": [
     "tests.test_context_evaluator.test_context_variable_path_resolution",
