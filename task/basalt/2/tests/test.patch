@@ -1,9 +1,9 @@
 diff --git a/tests/test_result_memoization.py b/tests/test_result_memoization.py
 new file mode 100644
-index 0000000..ebeec44
+index 0000000..28fe423
 --- /dev/null
 +++ b/tests/test_result_memoization.py
-@@ -0,0 +1,698 @@
+@@ -0,0 +1,703 @@
 +"""Contract coverage for reusable workflow step results.
 +
 +This suite verifies that deterministic workflow steps can safely reuse
@@ -286,12 +286,17 @@ index 0000000..ebeec44
 +
 +@pytest.mark.asyncio
 +async def test_result_cache_expires_entries() -> None:
-+    """Verify that entries expire after their TTL has elapsed."""
++    """Verify that entries expire after their TTL has elapsed, get increments misses, and purges them."""
 +    cache = ResultCache()
 +    await cache.put("ephemeral_key", {"temp": True}, ttl_seconds=0.01)
-+    await asyncio.sleep(0.1)
++    await asyncio.sleep(0.05)
 +
 +    assert await cache.get("ephemeral_key") is None
++    assert await cache.invalidate("ephemeral_key") is False
++
++    stats = await cache.stats()
++    assert stats["misses"] == 1
++    assert stats["entries"] == 0
 +
 +
 +@pytest.mark.asyncio
@@ -704,10 +709,10 @@ index 0000000..ebeec44
 +    assert second_run.outputs["work"]["call"] == 1
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..d1ccf25
+index 0000000..dd418a5
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,430 @@
+@@ -0,0 +1,470 @@
 +"""Additional contract coverage for the public ResultCache surface.
 +
 +This module validates detailed boundary contracts for ResultCache methods,
@@ -715,6 +720,7 @@ index 0000000..d1ccf25
 +"""
 +
 +import asyncio
++import dataclasses
 +from typing import Any
 +
 +import pytest
@@ -1031,25 +1037,30 @@ index 0000000..d1ccf25
 +@pytest.mark.asyncio
 +async def test_cache_administration_summary_empty() -> None:
 +    """Verify that CacheAdministration.summary reports zero counts and empty keys."""
++    assert dataclasses.is_dataclass(CacheSummary)
 +    cache = ResultCache()
 +    admin = CacheAdministration(cache)
 +    summary = await admin.summary()
++    assert isinstance(summary, CacheSummary)
 +    assert summary.entries == 0
 +    assert summary.hits == 0
 +    assert summary.misses == 0
 +    assert summary.hit_rate == 0.0
-+    assert len(summary.keys) == 0
++    assert isinstance(summary.keys, tuple)
++    assert summary.keys == ()
 +    as_dict = summary.as_dict()
 +    assert as_dict["entries"] == 0
 +    assert as_dict["hits"] == 0
 +    assert as_dict["misses"] == 0
 +    assert as_dict["hit_rate"] == 0.0
-+    assert len(as_dict["keys"]) == 0
++    assert isinstance(as_dict["keys"], list)
++    assert as_dict["keys"] == []
 +
 +
 +@pytest.mark.asyncio
 +async def test_cache_administration_summary_with_hits_and_misses() -> None:
 +    """Verify that summary aggregates hits, misses, keys, and hit rate correctly."""
++    assert dataclasses.is_dataclass(CacheSummary)
 +    cache = ResultCache()
 +    admin = CacheAdministration(cache)
 +    await cache.put("key_b", {"val": 2})
@@ -1058,12 +1069,15 @@ index 0000000..d1ccf25
 +    await cache.get("missing_key")
 +
 +    summary = await admin.summary()
++    assert isinstance(summary, CacheSummary)
 +    assert summary.entries == 2
 +    assert summary.hits == 1
 +    assert summary.misses == 1
 +    assert summary.hit_rate == 0.5
++    assert isinstance(summary.keys, tuple)
 +    assert set(summary.keys) == {"key_a", "key_b"}
 +    as_dict = summary.as_dict()
++    assert isinstance(as_dict["keys"], list)
 +    assert set(as_dict["keys"]) == {"key_a", "key_b"}
 +    assert as_dict["hit_rate"] == 0.5
 +
@@ -1138,3 +1152,34 @@ index 0000000..d1ccf25
 +
 +    await asyncio.sleep(0.05)
 +    assert await admin.keys() == ["live_key"]
++
++
++def test_cache_summary_dataclass_contract() -> None:
++    """Verify that CacheSummary is a dataclass whose keys field is a tuple."""
++    assert dataclasses.is_dataclass(CacheSummary)
++    summary = CacheSummary(entries=1, hits=1, misses=0, hit_rate=1.0, keys=("k1", "k2"))
++    assert isinstance(summary.keys, tuple)
++    assert summary.keys == ("k1", "k2")
++    as_dict = summary.as_dict()
++    assert isinstance(as_dict["keys"], list)
++    assert as_dict["keys"] == ["k1", "k2"]
++
++
++@pytest.mark.asyncio
++async def test_result_cache_expired_get_increments_misses_and_removes_entry() -> None:
++    """Verify that get() on an expired key increments misses and removes the entry from the cache."""
++    cache = ResultCache()
++    await cache.put("item_expired", {"v": 100}, ttl_seconds=0.01)
++    await asyncio.sleep(0.05)
++
++    # Calling get() on an expired key must return None
++    assert await cache.get("item_expired") is None
++
++    # Calling invalidate() immediately after get() must return False because get() purged it
++    assert await cache.invalidate("item_expired") is False
++
++    # Calling stats() must report misses=1 and entries=0
++    stats = await cache.stats()
++    assert stats["misses"] == 1
++    assert stats["hits"] == 0
++    assert stats["entries"] == 0
