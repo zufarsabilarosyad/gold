@@ -704,10 +704,10 @@ index 0000000..ebeec44
 +    assert second_run.outputs["work"]["call"] == 1
 diff --git a/tests/test_result_memoization_contract_notes.py b/tests/test_result_memoization_contract_notes.py
 new file mode 100644
-index 0000000..cecbda6
+index 0000000..9572d8f
 --- /dev/null
 +++ b/tests/test_result_memoization_contract_notes.py
-@@ -0,0 +1,467 @@
+@@ -0,0 +1,430 @@
 +"""Additional contract coverage for the public ResultCache surface.
 +
 +This module validates detailed boundary contracts for ResultCache methods,
@@ -722,12 +722,7 @@ index 0000000..cecbda6
 +from basalt.core.dag.ast import DAGSpec, ExecutorType, MemoizationPolicySpec, StepSpec
 +from basalt.core.engine.hooks import HookRegistry, LifecycleEvent
 +from basalt.core.engine.memoization import ResultCache
-+from basalt.core.engine.memoization_admin import (
-+    CacheAdministration,
-+    CacheHealth,
-+    CacheSummary,
-+    assess_cache_health,
-+)
++from basalt.core.engine.memoization_admin import CacheAdministration, CacheSummary
 +from basalt.core.engine.runner import WorkflowRunner
 +from basalt.core.executors.base import BaseExecutor
 +from basalt.core.executors.pool import ExecutorFactory, WorkerPool
@@ -1116,62 +1111,30 @@ index 0000000..cecbda6
 +
 +
 +@pytest.mark.asyncio
-+async def test_assess_cache_health_invalid_thresholds_raises_value_error() -> None:
-+    """Verify that invalid minimum_hit_rate or negative minimum_observations raises ValueError."""
++async def test_cache_administration_reset_statistics() -> None:
++    """Verify that reset_statistics clears cache entries but preserves lifetime hit/miss counters."""
 +    cache = ResultCache()
-+    with pytest.raises(ValueError):
-+        await assess_cache_health(cache, minimum_hit_rate=-0.01)
-+    with pytest.raises(ValueError):
-+        await assess_cache_health(cache, minimum_hit_rate=1.01)
-+    with pytest.raises(ValueError):
-+        await assess_cache_health(cache, minimum_observations=-1)
++    admin = CacheAdministration(cache)
++    await cache.put("key_a", {"val": 1})
++    await cache.put("key_b", {"val": 2})
++    await cache.get("key_a")
++    await cache.get("missing_key")
 +
++    initial_summary = await admin.summary()
++    assert initial_summary.entries == 2
++    assert initial_summary.hits == 1
++    assert initial_summary.misses == 1
 +
-+@pytest.mark.asyncio
-+async def test_assess_cache_health_insufficient_observations() -> None:
-+    """Verify that caches with fewer observations than minimum are reported as healthy."""
-+    cache = ResultCache()
-+    health = await assess_cache_health(cache, minimum_observations=5)
-+    assert health.healthy is True
-+    assert health.observations == 0
-+    assert isinstance(health.reason, str) and len(health.reason) > 0
-+    as_dict = health.as_dict()
-+    assert as_dict["healthy"] is True
-+    assert as_dict["observations"] == 0
-+    assert as_dict["hit_rate"] == 0.0
-+    assert as_dict["minimum_hit_rate"] == 0.0
-+    assert isinstance(as_dict["reason"], str) and len(as_dict["reason"]) > 0
-+
-+
-+@pytest.mark.asyncio
-+async def test_assess_cache_health_meets_threshold() -> None:
-+    """Verify that health check passes when hit rate meets or exceeds minimum threshold."""
-+    cache = ResultCache()
-+    await cache.put("key", {"value": 1})
-+    await cache.get("key")
-+    await cache.get("key")
-+    await cache.get("key")
-+    await cache.get("missing")
-+
-+    health = await assess_cache_health(cache, minimum_hit_rate=0.75, minimum_observations=4)
-+    assert health.healthy is True
-+    assert health.hit_rate == 0.75
-+    assert isinstance(health.reason, str) and len(health.reason) > 0
-+    assert health.observations == 4
-+
-+
-+@pytest.mark.asyncio
-+async def test_assess_cache_health_below_threshold() -> None:
-+    """Verify that health check reports unhealthy when hit rate falls below minimum threshold."""
-+    cache = ResultCache()
-+    await cache.put("key", {"value": 1})
-+    await cache.get("key")
-+    await cache.get("missing_1")
-+    await cache.get("missing_2")
-+    await cache.get("missing_3")
-+
-+    health = await assess_cache_health(cache, minimum_hit_rate=0.5, minimum_observations=4)
-+    assert health.healthy is False
-+    assert health.hit_rate == 0.25
-+    assert isinstance(health.reason, str) and len(health.reason) > 0
-+    assert health.observations == 4
++    reset_summary = await admin.reset_statistics()
++    assert reset_summary.entries == 0
++    assert reset_summary.hits == 1
++    assert reset_summary.misses == 1
++    assert reset_summary.hit_rate == 0.5
++    assert len(reset_summary.keys) == 0
++    as_dict = reset_summary.as_dict()
++    assert as_dict["entries"] == 0
++    assert as_dict["hits"] == 1
++    assert as_dict["misses"] == 1
++    assert as_dict["hit_rate"] == 0.5
++    assert len(as_dict["keys"]) == 0
++    assert await cache.keys() == []

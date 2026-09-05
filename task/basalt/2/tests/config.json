@@ -50,10 +50,7 @@
     "tests.test_result_memoization_contract_notes.test_cache_administration_contains_live_and_expired",
     "tests.test_result_memoization_contract_notes.test_cache_administration_invalidate_prefix",
     "tests.test_result_memoization_contract_notes.test_cache_administration_invalidate_many_deduplicates",
-    "tests.test_result_memoization_contract_notes.test_assess_cache_health_invalid_thresholds_raises_value_error",
-    "tests.test_result_memoization_contract_notes.test_assess_cache_health_insufficient_observations",
-    "tests.test_result_memoization_contract_notes.test_assess_cache_health_meets_threshold",
-    "tests.test_result_memoization_contract_notes.test_assess_cache_health_below_threshold"
+    "tests.test_result_memoization_contract_notes.test_cache_administration_reset_statistics"
   ],
   "p2p_node_ids": [
     "tests.test_context_evaluator.test_context_variable_path_resolution",
