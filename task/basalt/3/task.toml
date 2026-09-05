@@ -1,0 +1,39 @@
+schema_version = "1.1"
+artifacts = ["/logs/artifacts/model.patch"]
+
+[task]
+name = "afterquery/run-event-timeline"
+
+
+[metadata]
+task_id = "run-event-timeline"
+display_title = "In-memory workflow event ledger"
+display_description = "Build isolated workflow run timelines with event recording, filtering, paging, restoration, and summaries."
+category = "feature_request"
+language = "python"
+repository_url = "https://github.com/zufarsabilarosyad/basalt"
+base_commit_hash = "69686949e6162606cc54293dc2af217d63161577"
+
+[agent]
+timeout_sec = 5400
+
+[verifier]
+environment_mode = "separate"
+timeout_sec = 1800
+
+[verifier.environment]
+build_timeout_sec = 1800
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+allow_internet = false
+
+[environment]
+build_timeout_sec = 1800
+docker_image = "us-docker.pkg.dev/afterquery-compute/compute-images/gold-repo-basalt-dnzdhf:v2"
+os = "linux"
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+gpus = 0
+allow_internet = false

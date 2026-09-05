@@ -1,0 +1,512 @@
+diff --git a/src/basalt/core/engine/__init__.py b/src/basalt/core/engine/__init__.py
+index d19d460..423ecad 100644
+--- a/src/basalt/core/engine/__init__.py
++++ b/src/basalt/core/engine/__init__.py
+@@ -1 +1,17 @@
+-"""Workflow Execution Engine, State Machine, Context, and Evaluator Package."""
++"""Workflow execution engine and public run-timeline values."""
++
++from basalt.core.engine.timeline import RunTimeline
++from basalt.core.engine.timeline_types import (
++    RunEvent,
++    RunEventPage,
++    RunEventSummary,
++    RunEventType,
++)
++
++__all__ = [
++    "RunEvent",
++    "RunEventPage",
++    "RunEventSummary",
++    "RunEventType",
++    "RunTimeline",
++]
+diff --git a/src/basalt/core/engine/timeline.py b/src/basalt/core/engine/timeline.py
+new file mode 100644
+index 0000000..c906b57
+--- /dev/null
++++ b/src/basalt/core/engine/timeline.py
+@@ -0,0 +1,92 @@
++"""Append-only, in-memory workflow run event timeline."""
++
++from __future__ import annotations
++
++from collections.abc import Iterable
++from datetime import UTC, datetime
++from typing import Any
++
++from basalt.core.engine.timeline_copy import copy_data, copy_event, copy_events
++from basalt.core.engine.timeline_query import query_events
++from basalt.core.engine.timeline_restore import restore_events
++from basalt.core.engine.timeline_summary import summarize_events
++from basalt.core.engine.timeline_types import (
++    RunEvent,
++    RunEventPage,
++    RunEventSummary,
++    RunEventType,
++)
++from basalt.core.engine.timeline_validation import require_identifier
++
++
++class RunTimeline:
++    """Own the ordered event history for one workflow run."""
++
++    def __init__(self, run_id: str, dag_id: str) -> None:
++        self.run_id = require_identifier(run_id, "run_id")
++        self.dag_id = require_identifier(dag_id, "dag_id")
++        self._events: list[RunEvent] = []
++
++    @classmethod
++    def restore(
++        cls,
++        run_id: str,
++        dag_id: str,
++        events: Iterable[RunEvent | dict[str, Any]],
++    ) -> RunTimeline:
++        """Rebuild a timeline from validated event objects or dictionaries.
++
++        Validation is performed before the restored list is exposed. Sequence
++        numbers must be contiguous and one-based, identities must match the
++        requested timeline, and timestamps may not move backwards.
++        """
++        timeline = cls(run_id, dag_id)
++        timeline._events = restore_events(run_id, dag_id, events)
++        return timeline
++
++    def append(
++        self,
++        type: RunEventType | str,
++        *,
++        step_id: str | None = None,
++        data: dict[str, Any] | None = None,
++        timestamp: datetime | None = None,
++    ) -> RunEvent:
++        """Append an event with the next sequence and return an isolated copy."""
++        event = RunEvent(
++            sequence=len(self._events) + 1,
++            run_id=self.run_id,
++            dag_id=self.dag_id,
++            type=type,
++            timestamp=timestamp or datetime.now(UTC),
++            step_id=step_id,
++            data=copy_data(data),
++        )
++        self._events.append(event)
++        return copy_event(event)
++
++    def snapshot(self) -> list[RunEvent]:
++        """Return a deep copy of all events in sequence order."""
++        return copy_events(self._events)
++
++    def query(
++        self,
++        *,
++        event_types: RunEventType | str | Iterable[RunEventType | str] | None = None,
++        step_id: str | None = None,
++        after_sequence: int = 0,
++        limit: int = 100,
++    ) -> RunEventPage:
++        """Filter and page this timeline without exposing mutable state."""
++        return query_events(
++            self.run_id,
++            self._events,
++            event_types=event_types,
++            step_id=step_id,
++            after_sequence=after_sequence,
++            limit=limit,
++        )
++
++    def summarize(self) -> RunEventSummary:
++        """Return counts, step outcomes, and time boundaries for this run."""
++        return summarize_events(self.run_id, self._events)
+diff --git a/src/basalt/core/engine/timeline_types.py b/src/basalt/core/engine/timeline_types.py
+new file mode 100644
+index 0000000..eee39ce
+--- /dev/null
++++ b/src/basalt/core/engine/timeline_types.py
+@@ -0,0 +1,117 @@
++"""Public value objects used by workflow run timelines."""
++
++from __future__ import annotations
++
++from datetime import UTC, datetime
++from enum import Enum
++from typing import Any
++
++from pydantic import BaseModel, Field, field_validator, model_validator
++
++
++class RunEventType(str, Enum):
++    """Stable string values for workflow and step lifecycle events."""
++
++    WORKFLOW_STARTED = "workflow_started"
++    STEP_STARTED = "step_started"
++    STEP_SUCCEEDED = "step_succeeded"
++    STEP_FAILED = "step_failed"
++    STEP_SKIPPED = "step_skipped"
++    WORKFLOW_SUCCEEDED = "workflow_succeeded"
++    WORKFLOW_FAILED = "workflow_failed"
++    WORKFLOW_CANCELLED = "workflow_cancelled"
++
++    @property
++    def is_workflow_event(self) -> bool:
++        """Whether this value describes the workflow rather than one step."""
++        return self.value.startswith("workflow_")
++
++    @property
++    def is_step_event(self) -> bool:
++        """Whether this value describes an individual workflow step."""
++        return self.value.startswith("step_")
++
++    @property
++    def is_terminal(self) -> bool:
++        """Whether this value records a final workflow outcome."""
++        return self.value in {
++            "workflow_succeeded",
++            "workflow_failed",
++            "workflow_cancelled",
++        }
++
++
++class RunEvent(BaseModel):
++    """One immutable-by-convention observation in a run timeline."""
++
++    sequence: int = Field(..., ge=1)
++    run_id: str
++    dag_id: str
++    type: RunEventType
++    timestamp: datetime
++    step_id: str | None = None
++    data: dict[str, Any] = Field(default_factory=dict)
++
++    @field_validator("run_id", "dag_id")
++    @classmethod
++    def require_identity(cls, value: str) -> str:
++        """Prevent events that cannot be associated with a run and DAG."""
++        if not value:
++            raise ValueError("event identifiers must not be empty")
++        return value
++
++    @field_validator("timestamp")
++    @classmethod
++    def normalize_timestamp(cls, value: datetime) -> datetime:
++        """Reject ambiguous datetimes and store every timestamp in UTC."""
++        if value.tzinfo is None or value.utcoffset() is None:
++            raise ValueError("event timestamp must include a timezone")
++        return value.astimezone(UTC)
++
++
++class RunEventPage(BaseModel):
++    """A page of events returned after an exclusive sequence cursor."""
++
++    run_id: str
++    events: list[RunEvent] = Field(default_factory=list)
++    next_after_sequence: int = Field(..., ge=0)
++    has_more: bool = False
++
++    @model_validator(mode="after")
++    def require_coherent_page(self) -> RunEventPage:
++        """Reject pages with mixed identity, disorder, or a false cursor."""
++        previous = 0
++        for event in self.events:
++            if event.run_id != self.run_id:
++                raise ValueError("page events must belong to its run")
++            if event.sequence <= previous:
++                raise ValueError("page events must be ordered")
++            previous = event.sequence
++        if self.events and self.next_after_sequence != self.events[-1].sequence:
++            raise ValueError("page cursor must identify its final event")
++        return self
++
++
++class RunEventSummary(BaseModel):
++    """Aggregated counts and boundaries for one timeline."""
++
++    run_id: str
++    total_events: int = Field(..., ge=0)
++    first_timestamp: datetime | None = None
++    last_timestamp: datetime | None = None
++    elapsed_ms: float | None = Field(default=None, ge=0)
++    event_counts: dict[RunEventType, int] = Field(default_factory=dict)
++    step_counts: dict[str, int] = Field(default_factory=dict)
++    started_step_ids: list[str] = Field(default_factory=list)
++    succeeded_step_ids: list[str] = Field(default_factory=list)
++    failed_step_ids: list[str] = Field(default_factory=list)
++    skipped_step_ids: list[str] = Field(default_factory=list)
++    terminal_type: RunEventType | None = None
++
++    def has_failures(self) -> bool:
++        """Return true when the timeline contains a failed step."""
++        return bool(self.failed_step_ids)
++
++    def has_skips(self) -> bool:
++        """Return true when the timeline contains a skipped step."""
++        return bool(self.skipped_step_ids)
+diff --git a/src/basalt/core/engine/timeline_query.py b/src/basalt/core/engine/timeline_query.py
+new file mode 100644
+index 0000000..f4955b5
+--- /dev/null
++++ b/src/basalt/core/engine/timeline_query.py
+@@ -0,0 +1,61 @@
++"""Filtering and cursor paging for run event collections."""
++
++from __future__ import annotations
++
++from collections.abc import Iterable
++
++from basalt.core.engine.timeline_copy import copy_events
++from basalt.core.engine.timeline_types import RunEvent, RunEventPage, RunEventType
++from basalt.core.engine.timeline_validation import require_cursor, require_limit
++
++
++def normalize_types(
++    values: RunEventType | str | Iterable[RunEventType | str] | None,
++) -> set[RunEventType] | None:
++    """Convert a single value or iterable into a comparable event-type set."""
++    if values is None:
++        return None
++    if isinstance(values, (RunEventType, str)):
++        values = [values]
++    return {value if isinstance(value, RunEventType) else RunEventType(value) for value in values}
++
++
++def query_events(
++    run_id: str,
++    events: Iterable[RunEvent],
++    *,
++    event_types: RunEventType | str | Iterable[RunEventType | str] | None = None,
++    step_id: str | None = None,
++    after_sequence: int = 0,
++    limit: int = 100,
++) -> RunEventPage:
++    """Filter events and return one page after an exclusive cursor.
++
++    Type and step filters are evaluated before limiting so sparse matches do
++    not produce prematurely short pages. The returned values are copied to
++    keep callers from mutating the timeline through a query result.
++    """
++    require_cursor(after_sequence)
++    require_limit(limit)
++
++    selected_types = normalize_types(event_types)
++    matches: list[RunEvent] = []
++    for event in events:
++        if event.run_id != run_id:
++            continue
++        if event.sequence <= after_sequence:
++            continue
++        if selected_types is not None and event.type not in selected_types:
++            continue
++        if step_id is not None and event.step_id != step_id:
++            continue
++        matches.append(event)
++
++    selected = matches[:limit]
++    next_cursor = selected[-1].sequence if selected else after_sequence
++    return RunEventPage(
++        run_id=run_id,
++        events=copy_events(selected),
++        next_after_sequence=next_cursor,
++        has_more=len(matches) > len(selected),
++    )
+diff --git a/src/basalt/core/engine/timeline_summary.py b/src/basalt/core/engine/timeline_summary.py
+new file mode 100644
+index 0000000..b560489
+--- /dev/null
++++ b/src/basalt/core/engine/timeline_summary.py
+@@ -0,0 +1,70 @@
++"""Summary construction for workflow run timelines."""
++
++from __future__ import annotations
++
++from collections.abc import Iterable
++
++from basalt.core.engine.timeline_types import RunEvent, RunEventSummary, RunEventType
++
++
++def summarize_events(run_id: str, events: Iterable[RunEvent]) -> RunEventSummary:
++    """Aggregate an ordered stream without changing the source events.
++
++    Counts retain enum keys so callers can use the same values accepted by
++    ``RunTimeline.append`` and ``RunTimeline.query``. Step lists are assembled
++    during the same ordered pass, preserving the order in which each outcome
++    was first observed. A reverse scan selects the most recent terminal event
++    without assuming that a restored history contains only one such value.
++    """
++    matching = [event for event in events if event.run_id == run_id]
++    event_counts: dict[RunEventType, int] = {}
++    step_counts: dict[str, int] = {}
++    started: list[str] = []
++    succeeded: list[str] = []
++    failed: list[str] = []
++    skipped: list[str] = []
++
++    for event in matching:
++        event_counts[event.type] = event_counts.get(event.type, 0) + 1
++        if event.step_id is not None:
++            step_counts[event.step_id] = step_counts.get(event.step_id, 0) + 1
++
++        target: list[str] | None = None
++        if event.type.value == "step_started":
++            target = started
++        elif event.type.value == "step_succeeded":
++            target = succeeded
++        elif event.type.value == "step_failed":
++            target = failed
++        elif event.type.value == "step_skipped":
++            target = skipped
++        if target is not None and event.step_id is not None and event.step_id not in target:
++            target.append(event.step_id)
++
++    terminal_type = next(
++        (event.type for event in reversed(matching) if event.type.is_terminal),
++        None,
++    )
++    first_timestamp = matching[0].timestamp if matching else None
++    last_timestamp = matching[-1].timestamp if matching else None
++    elapsed_ms = None
++    if first_timestamp is not None and last_timestamp is not None:
++        elapsed_ms = max(
++            0.0,
++            (last_timestamp - first_timestamp).total_seconds() * 1000.0,
++        )
++
++    return RunEventSummary(
++        run_id=run_id,
++        total_events=len(matching),
++        first_timestamp=first_timestamp,
++        last_timestamp=last_timestamp,
++        elapsed_ms=elapsed_ms,
++        event_counts=event_counts,
++        step_counts=step_counts,
++        started_step_ids=started,
++        succeeded_step_ids=succeeded,
++        failed_step_ids=failed,
++        skipped_step_ids=skipped,
++        terminal_type=terminal_type,
++    )
+diff --git a/src/basalt/core/engine/timeline_copy.py b/src/basalt/core/engine/timeline_copy.py
+new file mode 100644
+index 0000000..76c49a2
+--- /dev/null
++++ b/src/basalt/core/engine/timeline_copy.py
+@@ -0,0 +1,26 @@
++"""Defensive-copy helpers shared by timeline operations."""
++
++from __future__ import annotations
++
++import copy
++from collections.abc import Iterable, Mapping
++from typing import Any
++
++from basalt.core.engine.timeline_types import RunEvent
++
++
++def copy_data(data: Mapping[str, Any] | None) -> dict[str, Any]:
++    """Copy caller-owned event data into a plain independent dictionary."""
++    if data is None:
++        return {}
++    return copy.deepcopy(dict(data))
++
++
++def copy_event(event: RunEvent) -> RunEvent:
++    """Create an independent event including all nested data values."""
++    return event.model_copy(deep=True)
++
++
++def copy_events(events: Iterable[RunEvent]) -> list[RunEvent]:
++    """Copy an event iterable while preserving its current order."""
++    return [copy_event(event) for event in events]
+diff --git a/src/basalt/core/engine/timeline_restore.py b/src/basalt/core/engine/timeline_restore.py
+new file mode 100644
+index 0000000..6822bca
+--- /dev/null
++++ b/src/basalt/core/engine/timeline_restore.py
+@@ -0,0 +1,58 @@
++"""Validation used when restoring persisted timeline snapshots."""
++
++from __future__ import annotations
++
++from collections.abc import Iterable
++from datetime import datetime
++from typing import Any
++
++from basalt.core.engine.timeline_copy import copy_event
++from basalt.core.engine.timeline_types import RunEvent
++
++
++def coerce_event(value: RunEvent | dict[str, Any]) -> RunEvent:
++    """Validate a dictionary or retain an already validated event value."""
++    if isinstance(value, RunEvent):
++        return value
++    return RunEvent.model_validate(value)
++
++
++def validate_position(event: RunEvent, expected_sequence: int) -> None:
++    """Require the next contiguous, one-based sequence number."""
++    if event.sequence != expected_sequence:
++        raise ValueError("event sequences must be contiguous and one-based")
++
++
++def validate_identity(event: RunEvent, run_id: str, dag_id: str) -> None:
++    """Require every event to belong to its containing run timeline."""
++    if event.run_id != run_id or event.dag_id != dag_id:
++        raise ValueError("event identity does not match the timeline")
++
++
++def validate_timestamp_order(
++    event: RunEvent,
++    previous_timestamp: datetime | None,
++) -> None:
++    """Require timestamps to retain their observation order."""
++    if previous_timestamp is not None and event.timestamp < previous_timestamp:
++        raise ValueError("event timestamps must not move backwards")
++
++
++def restore_events(
++    run_id: str,
++    dag_id: str,
++    events: Iterable[RunEvent | dict[str, Any]],
++) -> list[RunEvent]:
++    """Validate and defensively copy a complete restored event stream."""
++    restored: list[RunEvent] = []
++    previous_timestamp: datetime | None = None
++
++    for expected_sequence, value in enumerate(events, start=1):
++        event = coerce_event(value)
++        validate_position(event, expected_sequence)
++        validate_identity(event, run_id, dag_id)
++        validate_timestamp_order(event, previous_timestamp)
++        restored.append(copy_event(event))
++        previous_timestamp = event.timestamp
++
++    return restored
+diff --git a/src/basalt/core/engine/timeline_validation.py b/src/basalt/core/engine/timeline_validation.py
+new file mode 100644
+index 0000000..9473980
+--- /dev/null
++++ b/src/basalt/core/engine/timeline_validation.py
+@@ -0,0 +1,22 @@
++"""Input validation shared by timeline construction and querying."""
++
++
++def require_identifier(value: str, name: str) -> str:
++    """Return a nonempty identifier or reject it with ``ValueError``."""
++    if not value:
++        raise ValueError(f"{name} must not be empty")
++    return value
++
++
++def require_cursor(after_sequence: int) -> int:
++    """Return a valid nonnegative exclusive sequence cursor."""
++    if after_sequence < 0:
++        raise ValueError("after_sequence must be nonnegative")
++    return after_sequence
++
++
++def require_limit(limit: int) -> int:
++    """Return a page size within the public inclusive bounds."""
++    if not 1 <= limit <= 200:
++        raise ValueError("limit must be between 1 and 200")
++    return limit
+
