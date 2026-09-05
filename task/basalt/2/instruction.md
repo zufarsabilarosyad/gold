@@ -1,9 +1,26 @@
-Basalt currently runs every workflow step from scratch, even when a deterministic step has already produced a result for the same inputs. Add an opt-in memoization layer so repeated work can be reused while existing workflows continue to behave exactly as they do today.
+Add step memoization and cache administration.
 
-Define `MemoizationPolicySpec` in `basalt.core.dag.ast` and expose it through a new `memoization` field on `StepSpec`. The policy should default to disabled and provide `key: str | None = None`, `ttl_seconds: float | None = None`, and `include_inputs: bool = True`. Reject TTL values that are zero or negative.
+In `basalt.core.dag.ast`:
+- `MemoizationPolicySpec(BaseModel)`: `enabled: bool = False`, `key: str | None = None`, `ttl_seconds: float | None = Field(default=None, gt=0.0)`, `include_inputs: bool = True`.
+- `StepSpec`: `memoization: MemoizationPolicySpec = Field(default_factory=MemoizationPolicySpec)`.
 
-The cache itself should be available as the asynchronous `ResultCache` in `basalt.core.engine.memoization`. Give it `get(key)`, `put(key, output, ttl_seconds=None)`, `invalidate(key)`, `clear()`, `keys()`, and `stats()` operations. A missing or expired lookup returns `None`; invalidation says whether anything was removed; clearing returns the number of removed entries; and statistics report integer `entries`, `hits`, and `misses`. Store and return deep copies so one caller cannot accidentally change a value seen by another.
+In `basalt.core.engine.hooks`: add `LifecycleEvent.STEP_CACHE_HIT = "step_cache_hit"`.
 
-Finally, allow `WorkflowRunner` to receive an optional `result_cache`, creating a fresh cache when none is supplied. An enabled step should reuse a successful result when its policy key and applicable workflow inputs match. Explicit keys must remain separate, `include_inputs: false` must allow reuse across different inputs, expired results must run again, and failures must never enter the cache. Cache hits should still appear as ordinary completed steps with their usual workflow outputs. Sharing one cache between runner instances must also work.
+In `basalt.core.engine.memoization`, async `ResultCache`:
+- `get(key)`: returns deep copy on hit; on miss/expiry returns `None`, purges entry, increments misses.
+- `put(key, output, ttl_seconds=None)`: stores deep copy and optional expiry.
+- `invalidate(key) -> bool`: returns `True` if deleted else `False`.
+- `clear() -> int` and `purge_expired() -> int`: return count removed.
+- `keys() -> list[str]`: purges expired entries, returns active keys.
+- `stats()`: purges expired entries, returns `{"entries": int, "hits": int, "misses": int}`.
+
+In `basalt.core.engine.memoization_admin`:
+- `CacheSummary`: dataclass (`entries: int`, `hits: int`, `misses: int`, `hit_rate: float`, `keys: tuple[str, ...]`); `as_dict()` returns dict of fields.
+- `CacheAdministration(cache: ResultCache)` with async methods: `summary() -> CacheSummary` (keys as tuple; hit rate `hits/(hits+misses)` or `0.0`), `contains(key) -> bool` (True if active else False), `keys(prefix=None) -> list[str]` (sorted active keys, prefix-filtered if given), `evict_expired() -> int`, `invalidate_prefix(prefix) -> int`, and `invalidate_many(keys) -> int` (deduplicates keys; each returns count removed).
+
+In `WorkflowRunner`:
+- `__init__` accepts optional `result_cache` (on `self.result_cache`, defaults to `ResultCache()`).
+- Cache key: namespace (`policy.key` if set, else `f"{context.dag_id}:{step.id}"`), step definition (`step.model_dump(mode="json")` excluding `name`, `description`, `memoization`), upstream outputs (`{p: context.get_step_output(p) for p in sorted(step.depends_on)}`), and `context.inputs` (if `include_inputs`).
+- When `step.memoization.enabled`: on hit, skip execution/STEP_START, set `context.set_step_state(step.id, StepState.COMPLETED)` and `context.set_step_output(step.id, cached)`, trigger `STEP_CACHE_HIT` (`{"step_id": step.id, "cache_key": key, "output": cached}`) then `STEP_SUCCESS` (`{"step_id": step.id, "output": cached, "cached": True}`). On miss: execute; on success cache with TTL and trigger `STEP_SUCCESS` (`{"step_id": step.id, "output": output, "cached": False}`). Never cache failures.
 
 IMPORTANT: Please work on this in a new branch from main and commit everything when you are done.
